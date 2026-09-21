@@ -533,9 +533,10 @@ function setMode(mode) {
   $("#opts-audio").classList.toggle("hidden", mode !== "audio");
   $("#opts-all").classList.toggle("hidden", mode !== "all");
   updateAlangRow();
-  // Отрезок доступен для видео и аудио (не для «Все форматы» и галерей).
+  // Отрезок — для видео/аудио, кроме YouTube (там HLS ломает обрезку) и галерей.
+  const ytClip = current && /youtube/i.test(current.extractor || "");
   $("#clip-row").classList.toggle("hidden",
-    (current && current.is_gallery) || !(mode === "video" || mode === "audio"));
+    ytClip || (current && current.is_gallery) || !(mode === "video" || mode === "audio"));
   updateSizeEst();
 }
 document.querySelectorAll("#mode-seg button").forEach(b =>
