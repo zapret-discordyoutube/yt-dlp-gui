@@ -26,7 +26,12 @@
     </div>
     <nav class="topnav">
       <a href="/stats">Статистика</a>
-      <button class="icon-btn" id="theme-toggle" aria-label="Сменить тему" title="Сменить тему"><svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" aria-hidden="true"><path d="M21 12.8A9 9 0 1 1 11.2 3a7 7 0 0 0 9.8 9.8z"/></svg></button>
+      <a class="topnav__ch" href="https://t.me/bypassblock" target="_blank" rel="noopener noreferrer" title="Наш канал в Telegram"><svg width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M4 11.5 20 5l-2.5 14-5-4-2.5 3-.5-4.5L18 7"/></svg><span>Канал</span></a>
+      <a class="topnav__repo" href="https://git.zapret.moe/zapretdiscordyoutube/yt-dlp-gui" target="_blank" rel="noopener noreferrer"
+         title="Исходный код проекта"><svg width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><circle cx="6" cy="5" r="2.5"/><circle cx="6" cy="19" r="2.5"/><circle cx="18" cy="9" r="2.5"/><path d="M6 7.5v9M8.5 5H14a4 4 0 0 1 4 4v0"/></svg><span>Исходники</span></a>
+      <a class="topnav__donate" href="https://t.me/zapretvpns_bot" target="_blank" rel="noopener noreferrer"
+         title="Поддержать проект"><svg width="14" height="14" viewBox="0 0 24 24" fill="currentColor" aria-hidden="true"><path d="M12 20s-7-4.3-7-9.2A4 4 0 0 1 12 8a4 4 0 0 1 7 2.8C19 15.7 12 20 12 20z"/></svg><span>Поддержать</span></a>
+            <button class="icon-btn" id="theme-toggle" aria-label="Сменить тему" title="Сменить тему"><svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" aria-hidden="true"><path d="M21 12.8A9 9 0 1 1 11.2 3a7 7 0 0 0 9.8 9.8z"/></svg></button>
     </nav>
   </div>
 </header>
@@ -178,8 +183,16 @@
   </section>
 
   <footer>
-    yt-grab — обёртка над <a href="https://github.com/yt-dlp/yt-dlp" rel="noopener noreferrer" target="_blank">yt-dlp</a>.
-    Скачивайте только тот контент, на который у вас есть права.
+    <p>yt-grab — открытая обёртка над
+      <a href="https://github.com/yt-dlp/yt-dlp" rel="noopener noreferrer" target="_blank">yt-dlp</a>.
+      <a href="https://git.zapret.moe/zapretdiscordyoutube/yt-dlp-gui" rel="noopener noreferrer" target="_blank">Исходный код</a>.
+      Скачивайте только тот контент, на который у вас есть права.</p>
+    <p class="footer__donate">
+      Сервис бесплатный и без рекламы. Если он полезен —
+      <a href="https://t.me/zapretvpns_bot" rel="noopener noreferrer" target="_blank">поддержите проект</a>:
+      это оплачивает сервер и трафик. Новости и обсуждение —
+      <a href="https://t.me/bypassblock" rel="noopener noreferrer" target="_blank">в нашем канале</a>.
+    </p>
   </footer>
 </main>
 

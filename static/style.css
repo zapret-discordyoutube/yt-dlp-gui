@@ -494,3 +494,37 @@ button.feed-count[aria-expanded="true"]{background:var(--accent-soft)}
   padding:5px 8px; border-radius:var(--r-xs);
 }
 .feed-time--note{background:transparent; color:var(--text-muted); font-family:var(--font-sans)}
+
+/* ---------- Исходники и поддержка в шапке ---------- */
+.topnav__repo, .topnav__donate{
+  display:inline-flex; align-items:center; gap:6px; white-space:nowrap;
+}
+.topnav__donate{
+  color:var(--accent); background:var(--accent-soft);
+  border:1px solid transparent;
+}
+.topnav__donate:hover{
+  color:var(--text-inverse); background:var(--accent);
+}
+.topnav__donate svg{flex:none}
+
+footer p{margin:0 0 6px}
+.footer__donate{color:var(--text-secondary)}
+.footer__donate a{color:var(--accent); font-weight:550; text-decoration:none}
+.footer__donate a:hover{text-decoration:underline}
+
+/* На узком экране в шапке оставляем только иконки — иначе она распирает
+   страницу, а подписи дублируются в подвале. */
+@media (max-width:640px){
+  .topnav__repo span, .topnav__donate span{
+    position:absolute; width:1px; height:1px; overflow:hidden;
+    clip:rect(0,0,0,0); white-space:nowrap;
+  }
+  .topnav__repo, .topnav__donate{padding:8px}
+}
+.topnav__ch{display:inline-flex; align-items:center; gap:6px; white-space:nowrap}
+@media (max-width:640px){
+  .topnav__ch span{position:absolute; width:1px; height:1px; overflow:hidden;
+    clip:rect(0,0,0,0); white-space:nowrap}
+  .topnav__ch{padding:8px}
+}
