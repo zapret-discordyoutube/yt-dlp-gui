@@ -528,3 +528,13 @@ footer p{margin:0 0 6px}
     clip:rect(0,0,0,0); white-space:nowrap}
   .topnav__ch{padding:8px}
 }
+
+/* На узком экране шапка с четырьмя ссылками не помещалась и давала
+   горизонтальный скролл всей страницы: убираем подпись домена у логотипа
+   и поджимаем отступы. Домен и так виден в адресной строке. */
+@media (max-width:640px){
+  .brand__sub{display:none}
+  .topnav{gap:2px}
+  .topnav a{padding:8px 6px}
+  .icon-btn{width:32px}
+}
