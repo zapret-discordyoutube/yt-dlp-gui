@@ -284,7 +284,28 @@ class DownloadManager:
         self.lock = threading.Lock()
         self.sema = threading.Semaphore(config.MAX_CONCURRENT_DOWNLOADS)
         config.DOWNLOAD_DIR.mkdir(parents=True, exist_ok=True)
+        self._sweep_orphans()
         self._start_janitor()
+
+    def _sweep_orphans(self) -> None:
+        """Подмести файлы, оставшиеся от прошлого запуска.
+
+        Состояние задач живёт только в памяти процесса, поэтому после
+        перезапуска ни один файл в каталоге никому не принадлежит —
+        забрать его всё равно уже нельзя. Без этого мусор копится до
+        срабатывания TTL.
+        """
+        freed = 0
+        for p in config.DOWNLOAD_DIR.iterdir():
+            if p.is_file() and p.name != ".gitkeep":
+                try:
+                    freed += p.stat().st_size
+                    p.unlink()
+                except OSError:
+                    pass
+        if freed:
+            print(f"[janitor] подметено осиротевших файлов: "
+                  f"{freed / 1048576:.0f} МБ", flush=True)
 
     # ---- очистка старых файлов/задач и контроль квоты ----
     def _dir_size_mb(self) -> float:
@@ -344,7 +365,14 @@ class DownloadManager:
         threading.Thread(target=loop, daemon=True).start()
 
     def quota_exceeded(self) -> bool:
-        return self._dir_size_mb() >= config.DISK_QUOTA_MB
+        """Своя квота ИЛИ нехватка места на разделе хоста."""
+        if self._dir_size_mb() >= config.DISK_QUOTA_MB:
+            return True
+        try:
+            free_mb = shutil.disk_usage(config.DOWNLOAD_DIR).free / 1048576
+        except OSError:
+            return False
+        return free_mb < config.MIN_FREE_DISK_MB
 
     # ---- запуск задачи ----
     def create(self, url: str, fmt: str, extra: dict, label: str,

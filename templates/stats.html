@@ -30,7 +30,7 @@
 
   <section class="hero" style="padding-bottom:var(--s-4)">
     <h1 style="font-size:28px">Как пользуются сервисом</h1>
-    <p>Обезличенные счётчики: сколько запросов и сколько отдано. Без ссылок, IP и привязки к людям.</p>
+    <p>Счётчики нагрузки и лента скачанного. Без IP и без привязки к тому, кто скачивал.</p>
   </section>
 
   <!-- Переключатель периода -->
@@ -89,11 +89,35 @@
     </div>
   </section>
 
+  <!-- Лента: что скачивают -->
+  <section class="section">
+    <div class="section__head">
+      <h2>Что скачивают <span class="pill" id="feed-total"></span></h2>
+      <div class="seg" id="feed-seg" role="radiogroup" aria-label="Сортировка" style="padding:2px">
+        <button type="button" role="radio" data-order="recent" aria-checked="true"
+                style="padding:6px 10px; font-size:12px">Недавние</button>
+        <button type="button" role="radio" data-order="popular" aria-checked="false"
+                style="padding:6px 10px; font-size:12px">Популярные</button>
+      </div>
+    </div>
+    <div class="stack" id="feed"></div>
+    <div class="empty" id="feed-empty">
+      <div class="empty__icon" aria-hidden="true">🎬</div>
+      <strong>Пока пусто</strong>
+      Здесь появятся ролики, которые скачивали через сервис.
+    </div>
+    <div style="display:flex; justify-content:center; margin-top:var(--s-4)">
+      <button class="btn btn--ghost hidden" id="feed-more">Показать ещё</button>
+    </div>
+  </section>
+
   <section class="section">
     <div class="note">
       <span aria-hidden="true">🔒</span>
-      <span>Здесь только суммы. Сервер не записывает, какие ссылки вставляли, с каких адресов и кто
-      что скачал — по этим числам невозможно восстановить ничьи действия.
+      <span>О ленте выше: сервер хранит <strong>только адрес ролика, дату и счётчик</strong> — ни
+      названий, ни обложек, ни размеров, ни того, кто скачивал. Названия и картинки ваш браузер
+      забирает напрямую с YouTube, сервер их не видит и не хранит.
+      Сами видеофайлы не сохраняются: они удаляются сразу после выдачи.
       <span id="since-note"></span></span>
     </div>
   </section>
@@ -209,7 +233,121 @@ document.querySelectorAll("#metric-seg button").forEach(b =>
     renderChart();
   }));
 
+/* ---------- Лента «что скачивают» ---------- */
+const esc = (s) => String(s ?? "").replace(/[&<>"']/g, c =>
+  ({ "&":"&amp;","<":"&lt;",">":"&gt;",'"':"&quot;","'":"&#39;" }[c]));
+
+/* Адреса приходят из БД и попадают в href — пропускаем только http(s),
+   чтобы исключить javascript:-ссылки. */
+const safeUrl = (u) => {
+  try {
+    const p = new URL(u);
+    return (p.protocol === "http:" || p.protocol === "https:") ? u : null;
+  } catch { return null; }
+};
+
+/* ID ролика -> обложка с CDN YouTube. Никаких запросов к нашему серверу. */
+function youtubeId(url) {
+  try {
+    const u = new URL(url);
+    const h = u.hostname.replace(/^www\./, "");
+    if (h === "youtu.be") return u.pathname.slice(1).split("/")[0] || null;
+    if (h.endsWith("youtube.com")) {
+      if (u.pathname === "/watch") return u.searchParams.get("v");
+      const m = u.pathname.match(/^\/(shorts|embed|live)\/([^/]+)/);
+      if (m) return m[2];
+    }
+  } catch { /* не ссылка */ }
+  return null;
+}
+
+const titleCache = new Map();
+async function fetchTitle(url) {
+  if (titleCache.has(url)) return titleCache.get(url);
+  try {
+    const r = await fetch("https://www.youtube.com/oembed?format=json&url=" +
+                          encodeURIComponent(url));
+    if (!r.ok) throw new Error("no oembed");
+    const d = await r.json();
+    titleCache.set(url, d.title);
+    return d.title;
+  } catch {
+    titleCache.set(url, null);   // не долбим источник повторно
+    return null;
+  }
+}
+
+let feedOrder = "recent", feedOffset = 0;
+
+const relTime = (iso) => {
+  const d = new Date(iso), diff = (Date.now() - d) / 1000;
+  if (diff < 60) return "только что";
+  if (diff < 3600) return `${Math.floor(diff / 60)} мин назад`;
+  if (diff < 86400) return `${Math.floor(diff / 3600)} ч назад`;
+  if (diff < 2592000) return `${Math.floor(diff / 86400)} дн назад`;
+  return d.toLocaleDateString("ru-RU", { day: "numeric", month: "short", year: "numeric" });
+};
+
+async function loadFeed(reset) {
+  if (reset) { feedOffset = 0; $("#feed").innerHTML = ""; }
+  const r = await fetch(`/api/feed?order=${feedOrder}&offset=${feedOffset}`);
+  const d = await r.json();
+  const items = d.items || [];
+
+  $("#feed-empty").classList.toggle("hidden", !!($("#feed").children.length || items.length));
+  if (d.totals && d.totals.unique) {
+    $("#feed-total").textContent = fmtNum(d.totals.unique) + " " +
+      plural(d.totals.unique, "ролик", "ролика", "роликов");
+    $("#feed-total").classList.remove("hidden");
+  } else {
+    $("#feed-total").classList.add("hidden");
+  }
+
+  items.forEach(it => {
+    const url = safeUrl(it.url);
+    if (!url) return;
+    const vid = youtubeId(url);
+    const host = (() => { try { return new URL(url).hostname.replace(/^www\./, ""); }
+                          catch { return ""; } })();
+    const el = document.createElement("div");
+    el.className = "feed-item";
+    el.innerHTML = `
+      <div class="feed-thumb">${vid
+        ? `<img src="https://i.ytimg.com/vi/${esc(vid)}/mqdefault.jpg" alt=""
+                loading="lazy" referrerpolicy="no-referrer">`
+        : `<span aria-hidden="true">🔗</span>`}</div>
+      <div class="feed-body">
+        <a class="feed-title" href="${esc(url)}" target="_blank"
+           rel="noopener noreferrer nofollow">${esc(url)}</a>
+        <div class="meta">${esc(host)} · ${esc(relTime(it.last_seen))}</div>
+      </div>
+      <div class="feed-count" title="Скачивали ${it.count} раз(а)">
+        <strong>${fmtNum(it.count)}</strong><span>раз</span>
+      </div>`;
+    $("#feed").appendChild(el);
+
+    // название подтягиваем с YouTube — наш сервер его не хранит
+    if (vid) {
+      const a = el.querySelector(".feed-title");
+      fetchTitle(url).then(t => { if (t) a.textContent = t; });
+    }
+  });
+
+  feedOffset += items.length;
+  $("#feed-more").classList.toggle("hidden", items.length < 50);
+}
+
+document.querySelectorAll("#feed-seg button").forEach(b =>
+  b.addEventListener("click", () => {
+    feedOrder = b.dataset.order;
+    document.querySelectorAll("#feed-seg button").forEach(x =>
+      x.setAttribute("aria-checked", String(x === b)));
+    loadFeed(true);
+  }));
+$("#feed-more").addEventListener("click", () => loadFeed(false));
+
 load();
+loadFeed(true);
 setInterval(load, 30000);
 </script>
 </body>

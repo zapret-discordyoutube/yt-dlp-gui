@@ -34,6 +34,7 @@ def _task_finished(task) -> None:
     """Считаем исход задачи. Пишем только числа, без URL и заголовков."""
     if task.status == "finished":
         stats.bump("downloads_done")
+        stats.record_download(task.url)
     elif task.status == "error":
         stats.bump("downloads_failed")
 
@@ -181,7 +182,11 @@ def api_progress(tid):
 
     def gen():
         last = None
-        while True:
+        # Поток держится всё время загрузки, поэтому ограничиваем его срок:
+        # иначе несколько зависших соединений исчерпают пул gunicorn.
+        # Браузер переподключит EventSource автоматически.
+        deadline = time.time() + config.SSE_MAX_SECONDS
+        while time.time() < deadline:
             t = manager.get(tid)
             if not t:
                 yield f"data: {json.dumps({'status': 'gone'})}\n\n"
@@ -193,6 +198,8 @@ def api_progress(tid):
             if t.status in ("finished", "error", "cancelled"):
                 return
             time.sleep(0.5)
+        # мягкий разрыв: клиент переподключится и продолжит следить
+        yield ": timeout\n\n"
 
     return Response(stream_with_context(gen()), mimetype="text/event-stream",
                     headers={"Cache-Control": "no-cache",
@@ -230,6 +237,19 @@ def api_file(tid):
 @app.get("/api/stats")
 def api_stats():
     return jsonify(stats.summary())
+
+
+@app.get("/api/feed")
+def api_feed():
+    order = "popular" if request.args.get("order") == "popular" else "recent"
+    try:
+        offset = max(0, int(request.args.get("offset", 0)))
+    except ValueError:
+        offset = 0
+    return jsonify({
+        "items": stats.feed(order=order, limit=config.FEED_PAGE_SIZE, offset=offset),
+        "totals": stats.feed_totals(),
+    })
 
 
 @app.get("/stats")

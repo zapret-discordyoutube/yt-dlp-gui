@@ -10,7 +10,7 @@ from __future__ import annotations
 
 import sqlite3
 import threading
-from datetime import date, timedelta
+from datetime import date, datetime, timedelta, timezone
 from pathlib import Path
 
 import config
@@ -27,6 +27,20 @@ CREATE TABLE IF NOT EXISTS daily (
     day TEXT PRIMARY KEY,
     {", ".join(f"{c} INTEGER NOT NULL DEFAULT 0" for c in COUNTERS)}
 );
+
+-- Публичная лента «что скачивают».
+-- Сознательно храним ТОЛЬКО адрес, даты и счётчик: ни названия, ни обложки,
+-- ни размера, ни выбранного формата. Название и картинку показывает браузер,
+-- забирая их напрямую с источника. И, разумеется, никакой связи с тем,
+-- КТО скачивал — ни IP, ни сессии.
+CREATE TABLE IF NOT EXISTS feed (
+    url        TEXT PRIMARY KEY,
+    first_seen TEXT NOT NULL,
+    last_seen  TEXT NOT NULL,
+    count      INTEGER NOT NULL DEFAULT 0
+);
+CREATE INDEX IF NOT EXISTS feed_last  ON feed(last_seen DESC);
+CREATE INDEX IF NOT EXISTS feed_count ON feed(count DESC);
 """
 
 
@@ -56,6 +70,51 @@ def bump(counter: str, amount: int = 1) -> None:
                 (amount, today))
     except sqlite3.Error:
         pass
+
+
+def record_download(url: str) -> None:
+    """Отметить факт скачивания ролика. Сохраняем адрес, дату и счётчик."""
+    if not config.FEED_ENABLED or not url:
+        return
+    now = datetime.now(timezone.utc).isoformat(timespec="seconds")
+    try:
+        with _lock, _connect() as conn:
+            conn.execute(
+                "INSERT INTO feed(url, first_seen, last_seen, count) "
+                "VALUES (?, ?, ?, 1) "
+                "ON CONFLICT(url) DO UPDATE SET "
+                "  last_seen = excluded.last_seen, count = count + 1",
+                (url, now, now))
+    except sqlite3.Error:
+        pass
+
+
+def feed(order: str = "recent", limit: int = 50, offset: int = 0) -> list[dict]:
+    """Лента: последние или самые популярные."""
+    if not config.FEED_ENABLED:
+        return []
+    col = "count DESC, last_seen DESC" if order == "popular" else "last_seen DESC"
+    limit = max(1, min(int(limit), 200))
+    try:
+        with _lock, _connect() as conn:
+            rows = conn.execute(
+                f"SELECT url, first_seen, last_seen, count FROM feed "
+                f"ORDER BY {col} LIMIT ? OFFSET ?", (limit, max(0, int(offset)))
+            ).fetchall()
+        return [{"url": r[0], "first_seen": r[1], "last_seen": r[2], "count": r[3]}
+                for r in rows]
+    except sqlite3.Error:
+        return []
+
+
+def feed_totals() -> dict:
+    try:
+        with _lock, _connect() as conn:
+            row = conn.execute(
+                "SELECT COUNT(*), COALESCE(SUM(count), 0) FROM feed").fetchone()
+        return {"unique": row[0], "total": row[1]}
+    except sqlite3.Error:
+        return {"unique": 0, "total": 0}
 
 
 def _sum_since(conn: sqlite3.Connection, since: str | None) -> dict:

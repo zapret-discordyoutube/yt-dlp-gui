@@ -16,7 +16,11 @@ PORT = int(os.environ.get("YTG_PORT", "8090"))
 MAX_CONCURRENT_DOWNLOADS = int(os.environ.get("YTG_MAX_CONCURRENT", "3"))
 MAX_FILESIZE_MB = int(os.environ.get("YTG_MAX_FILESIZE_MB", "2048"))   # потолок на один файл
 MAX_DURATION_SEC = int(os.environ.get("YTG_MAX_DURATION_SEC", str(4 * 3600)))  # 4 часа
-DISK_QUOTA_MB = int(os.environ.get("YTG_DISK_QUOTA_MB", "20480"))      # 20 ГБ на всю папку
+DISK_QUOTA_MB = int(os.environ.get("YTG_DISK_QUOTA_MB", "5120"))       # 5 ГБ на всю папку
+# Сервис живёт на Proxmox-хосте: мало оставить место себе, нужно не съесть
+# его у гипервизора. Если на разделе свободно меньше — новые загрузки не
+# принимаются, независимо от квоты выше.
+MIN_FREE_DISK_MB = int(os.environ.get("YTG_MIN_FREE_DISK_MB", "10240"))  # 10 ГБ
 
 # --- Приватность: сервер не хранит ничего ---
 # Файл удаляется после того, как пользователь его забрал.
@@ -41,3 +45,13 @@ RATE_MAX_DOWNLOAD = int(os.environ.get("YTG_RATE_MAX_DOWNLOAD", "6"))  # зап�
 
 # Заголовки, которым доверяем реальный IP (за reverse-proxy)
 TRUST_PROXY = os.environ.get("YTG_TRUST_PROXY", "1") == "1"
+
+# Максимальный срок одного SSE-соединения. Каждое занимает поток gunicorn,
+# поэтому рвём его принудительно — EventSource переподключится сам.
+SSE_MAX_SECONDS = int(os.environ.get("YTG_SSE_MAX_SECONDS", "900"))
+
+# --- Публичная лента «что скачивают» ---
+# Храним ТОЛЬКО адрес ролика, дату и счётчик. Ни названия, ни обложки:
+# их подтягивает браузер напрямую с источника.
+FEED_ENABLED = os.environ.get("YTG_FEED_ENABLED", "1") == "1"
+FEED_PAGE_SIZE = int(os.environ.get("YTG_FEED_PAGE_SIZE", "50"))
