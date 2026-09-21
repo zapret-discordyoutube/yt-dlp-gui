@@ -14,6 +14,17 @@ PORT = int(os.environ.get("YTG_PORT", "8090"))
 
 # Публичный сервис -> защита от абуза
 MAX_CONCURRENT_DOWNLOADS = int(os.environ.get("YTG_MAX_CONCURRENT", "3"))
+# Глубина очереди ожидания и потолок на число карточек задач в памяти.
+# Оба — защита от переполнения: переполнить память или число потоков
+# не должно получаться в принципе.
+QUEUE_MAX = int(os.environ.get("YTG_QUEUE_MAX", "50"))
+TASKS_MAX = int(os.environ.get("YTG_TASKS_MAX", "500"))
+
+# Параллельная загрузка фрагментов (DASH/HLS — то, чем отдаёт YouTube).
+# Без этого фрагменты тянутся строго по одному, и скорость упирается в
+# задержку до сервера, а не в канал. Держим умеренным: значение умножается
+# на число одновременных загрузок, а хост — гипервизор.
+CONCURRENT_FRAGMENTS = int(os.environ.get("YTG_CONCURRENT_FRAGMENTS", "5"))
 MAX_FILESIZE_MB = int(os.environ.get("YTG_MAX_FILESIZE_MB", "2048"))   # потолок на один файл
 MAX_DURATION_SEC = int(os.environ.get("YTG_MAX_DURATION_SEC", str(4 * 3600)))  # 4 часа
 DISK_QUOTA_MB = int(os.environ.get("YTG_DISK_QUOTA_MB", "5120"))       # 5 ГБ на всю папку

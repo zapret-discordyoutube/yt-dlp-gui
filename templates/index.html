@@ -5,9 +5,12 @@
 <meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
 <title>yt.zapret.moe — скачать видео и аудио</title>
 <meta name="description" content="Скачивание видео и аудио по ссылке. Настройки и история хранятся только в вашем браузере.">
-<link rel="preconnect" href="https://fonts.googleapis.com">
-<link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
-<link href="https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700&display=swap" rel="stylesheet">
+<!-- Шрифт размещён локально: внешний запрос к Google блокировал отрисовку
+     и попутно отдавал им IP каждого посетителя. -->
+<link rel="preload" as="font" type="font/woff2" crossorigin
+      href="{{ url_for('static', filename='fonts/inter-400-cyrillic.woff2') }}">
+<link rel="preload" as="font" type="font/woff2" crossorigin
+      href="{{ url_for('static', filename='fonts/inter-600-cyrillic.woff2') }}">
 <link rel="stylesheet" href="{{ url_for('static', filename='style.css') }}">
 </head>
 <body>
@@ -88,13 +91,17 @@
             </select>
           </div>
           <div class="field">
-            <label for="sel-vaudio">Аудио</label>
+            <label for="sel-vaudio" title="Какую звуковую дорожку взять из ролика">Звук в видео</label>
             <select class="input" id="sel-vaudio">
               <option value="auto">Все кодеки</option>
               <option value="aac">AAC</option>
               <option value="opus">Opus</option>
             </select>
           </div>
+          <p class="meta" style="flex-basis:100%; margin:0">
+            Это дорожка внутри видео — источник отдаёт только AAC и Opus.
+            MP3 доступен во вкладке «Аудио».
+          </p>
         </div>
 
         <!-- Аудио -->
@@ -411,7 +418,22 @@ function watchTask(id) {
       else if (t.status === "error") toast("Ошибка: " + (t.error || ""), "error");
     }
   };
-  es.onerror = () => es.close();
+  // Раньше здесь было es.close(): соединение закрывалось навсегда при любом
+  // разрыве, и карточка вечно висела на «Обработка…» — после перезапуска
+  // сервера или по истечении срока жизни SSE. Даём EventSource переподключиться,
+  // но не бесконечно: если задача пропала, честно об этом говорим.
+  let retries = 0;
+  es.onerror = () => {
+    if (++retries > 5) {
+      es.close();
+      const el = document.getElementById("task-" + id);
+      const status = el?.querySelector(`[data-status="${id}"]`);
+      if (status && !el.querySelector(".btn--success")) {
+        status.textContent = "Связь с сервером потеряна — запустите загрузку заново";
+        el.querySelector(".progress").dataset.state = "error";
+      }
+    }
+  };
 }
 
 function renderTask(t) {

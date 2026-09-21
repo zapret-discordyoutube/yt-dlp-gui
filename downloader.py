@@ -2,7 +2,9 @@
 from __future__ import annotations
 
 import ipaddress
+import logging
 import os
+import queue
 import re
 import socket
 import shutil
@@ -112,11 +114,24 @@ _MERGE_CONTAINERS = {"mp4", "webm", "mkv", "mov"}
 # Запрещены скобки, фильтры, '/', пробелы — то есть синтаксис селекторов yt-dlp.
 _FORMAT_ID_RE = re.compile(r"^[A-Za-z0-9_\-.]{1,48}(\+[A-Za-z0-9_\-.]{1,48})?$")
 
+# Регулярка выше пропускала не только идентификаторы, но и КЛЮЧЕВЫЕ СЛОВА
+# селектора: 'all' и 'mergeall' заставляли yt-dlp скачать все дорожки сразу,
+# а 'best'/'worst' подменяли выбор пользователя. Это и обход белого списка,
+# и усиление нагрузки, поэтому такие слова отвергаем явно.
+_FORMAT_KEYWORDS = {
+    "all", "mergeall", "best", "worst", "b", "w",
+    "bestvideo", "worstvideo", "bv", "wv",
+    "bestaudio", "worstaudio", "ba", "wa",
+    "bestvideo*", "bv*", "b*",
+}
+
 
 def build_from_format_id(format_id: str, container: str = "auto") -> tuple[str, dict, str]:
     """Точный выбор формата из того, что yt-dlp отдал для этого URL."""
     fid = (format_id or "").strip()
     if not _FORMAT_ID_RE.fullmatch(fid):
+        raise ValueError("bad_format_id")
+    if any(part.lower() in _FORMAT_KEYWORDS for part in fid.split("+")):
         raise ValueError("bad_format_id")
     extra: dict = {}
     if "+" in fid:
@@ -282,7 +297,13 @@ class DownloadManager:
         # обезличенных счётчиков; сам менеджер о статистике ничего не знает.
         self.on_complete = None
         self.lock = threading.Lock()
-        self.sema = threading.Semaphore(config.MAX_CONCURRENT_DOWNLOADS)
+        # Очередь с постоянным пулом вместо потока на задачу.
+        # Раньше каждая задача поднимала свой поток, который до получаса ждал
+        # на семафоре: шесть запусков в минуту с одного адреса давали около
+        # 180 висящих потоков при TasksMax=256, и сервис ложился с двух IP.
+        self.queue: queue.Queue = queue.Queue(maxsize=config.QUEUE_MAX)
+        for _ in range(config.MAX_CONCURRENT_DOWNLOADS):
+            threading.Thread(target=self._worker, daemon=True).start()
         config.DOWNLOAD_DIR.mkdir(parents=True, exist_ok=True)
         self._sweep_orphans()
         self._start_janitor()
@@ -356,12 +377,20 @@ class DownloadManager:
 
     def _start_janitor(self) -> None:
         def loop():
+            fails = 0
             while True:
                 time.sleep(config.JANITOR_INTERVAL_SEC)
                 try:
                     self._janitor_pass()
+                    fails = 0
                 except Exception:
-                    pass
+                    # Молчать нельзя: если уборщик умер (например, каталог
+                    # стал недоступен на запись), файлы перестают удаляться,
+                    # диск заполняется — и в журнале при этом пусто.
+                    fails += 1
+                    if fails in (1, 10) or fails % 100 == 0:
+                        logging.exception("уборщик не смог отработать "
+                                          "(подряд неудач: %d)", fails)
         threading.Thread(target=loop, daemon=True).start()
 
     def quota_exceeded(self) -> bool:
@@ -377,12 +406,34 @@ class DownloadManager:
     # ---- запуск задачи ----
     def create(self, url: str, fmt: str, extra: dict, label: str,
                title: str, thumbnail: str | None) -> Task:
-        task = Task(id=uuid.uuid4().hex[:12], url=url, title=title,
+        # Идентификатор — единственное, что защищает чужой файл от выдачи,
+        # поэтому берём его целиком, а не первые 12 символов.
+        task = Task(id=uuid.uuid4().hex, url=url, title=title,
                     fmt=fmt, extra=extra, label=label, thumbnail=thumbnail)
         with self.lock:
+            if len(self.tasks) >= config.TASKS_MAX:
+                raise Overloaded("too_many_tasks")
             self.tasks[task.id] = task
-        threading.Thread(target=self._run, args=(task,), daemon=True).start()
+        try:
+            self.queue.put_nowait(task)
+        except queue.Full:
+            with self.lock:
+                self.tasks.pop(task.id, None)
+            raise Overloaded("queue_full") from None
         return task
+
+    def _worker(self) -> None:
+        while True:
+            task = self.queue.get()
+            try:
+                self._run(task)
+            except Exception:                      # воркер обязан пережить всё
+                logging.exception("сбой воркера загрузки")
+            finally:
+                self.queue.task_done()
+
+    def pending(self) -> int:
+        return self.queue.qsize()
 
     def get(self, tid: str) -> Task | None:
         with self.lock:
@@ -401,9 +452,34 @@ class DownloadManager:
         return False
 
     def _make_hook(self, task: Task):
+        last_check = [0.0]
+
         def hook(d):
             if task.cancel.is_set():
                 raise yt_dlp.utils.DownloadCancelled()
+
+            # Сторожевой контроль прямо во время загрузки.
+            # max_filesize у yt-dlp проверяется по заголовку Content-Length и
+            # не работает для HLS/DASH и chunked-ответов: такой поток качался
+            # бы без ограничения размера. А хост — гипервизор, заполнить его
+            # раздел нельзя.
+            now = time.time()
+            if now - last_check[0] > 5:
+                last_check[0] = now
+                got = d.get("downloaded_bytes") or 0
+                if got > config.MAX_FILESIZE_MB * 1048576:
+                    task.error = "Файл превышает допустимый размер"
+                    task.cancel.set()
+                    raise yt_dlp.utils.DownloadCancelled()
+                try:
+                    free_mb = shutil.disk_usage(config.DOWNLOAD_DIR).free / 1048576
+                except OSError:
+                    free_mb = None
+                if free_mb is not None and free_mb < config.MIN_FREE_DISK_MB:
+                    task.error = "На сервере закончилось место"
+                    task.cancel.set()
+                    raise yt_dlp.utils.DownloadCancelled()
+
             st = d.get("status")
             if st == "downloading":
                 task.status = "downloading"
@@ -420,11 +496,6 @@ class DownloadManager:
         return hook
 
     def _run(self, task: Task) -> None:
-        acquired = self.sema.acquire(timeout=1800)
-        if not acquired:
-            task.status = "error"
-            task.error = "Сервис занят, попробуйте позже"
-            return
         try:
             if task.cancel.is_set():
                 task.status = "cancelled"
@@ -444,6 +515,7 @@ class DownloadManager:
                 "consoletitle": False,
                 "socket_timeout": 30,
                 "retries": 5,
+                "concurrent_fragment_downloads": config.CONCURRENT_FRAGMENTS,
                 "format": fmt,
                 "max_filesize": config.MAX_FILESIZE_MB * 1024 * 1024,
                 "progress_hooks": [self._make_hook(task)],
@@ -480,16 +552,22 @@ class DownloadManager:
                 task.status = "error"
                 task.error = "Файл не найден после скачивания"
         except yt_dlp.utils.DownloadCancelled:
-            task.status = "cancelled"
+            # Сторож мог прервать загрузку по размеру или нехватке места —
+            # тогда это ошибка с причиной, а не тихая отмена пользователем.
+            task.status = "error" if task.error else "cancelled"
             self._cleanup_partials(task)
         except yt_dlp.utils.DownloadError as e:
+            # осмысленное сообщение самого yt-dlp — показываем очищенным
             task.status = "error"
             task.error = _clean_err(str(e))
-        except Exception as e:  # noqa: BLE001
+            logging.warning("загрузка не удалась (%s): %s",
+                            _host_of(task.url), type(e).__name__)
+        except Exception:
+            # что угодно иное — внутренняя ошибка; наружу её текст не отдаём
             task.status = "error"
-            task.error = _clean_err(str(e))
+            task.error = "Внутренняя ошибка, попробуйте другой формат"
+            logging.exception("внутренний сбой задачи (%s)", _host_of(task.url))
         finally:
-            self.sema.release()
             if self.on_complete:
                 try:
                     self.on_complete(task)
@@ -505,9 +583,29 @@ class DownloadManager:
                 pass
 
 
+class Overloaded(Exception):
+    """Очередь или таблица задач переполнены."""
+
+
+def _host_of(url: str) -> str:
+    """Домен для журнала. Полный URL не пишем — это приватность пользователя."""
+    try:
+        return urlparse(url).hostname or "?"
+    except ValueError:
+        return "?"
+
+
 def _clean_err(msg: str) -> str:
-    msg = re.sub(r"\x1b\[[0-9;]*m", "", msg)          # ANSI
+    """Подготовить текст ошибки yt-dlp для показа пользователю.
+
+    Сообщения yt-dlp/ffmpeg полезны, но могут содержать локальные пути,
+    имя пользователя и внутренние адреса — наружу это отдавать нельзя.
+    """
+    msg = re.sub(r"\x1b\[[0-9;]*m", "", msg)                 # ANSI
     msg = msg.replace("ERROR:", "").strip()
+    msg = re.sub(r"(/[\w.\-]+){2,}", "<путь>", msg)          # пути на диске
+    msg = re.sub(r"\b\d{1,3}(\.\d{1,3}){3}\b", "<адрес>", msg)   # IPv4
+    msg = re.sub(r"\b(?:127\.0\.0\.1|localhost)(?::\d+)?\b", "<адрес>", msg)
     return msg[:300] if msg else "Ошибка скачивания"
 
 

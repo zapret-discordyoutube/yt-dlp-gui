@@ -127,16 +127,16 @@ def _sum_since(conn: sqlite3.Connection, since: str | None) -> dict:
 
 
 def summary() -> dict:
-    """Итоги за сегодня / неделю / месяц / всё время + ряд по дням."""
+    """Ряд по дням за 30 суток + итог за всё время.
+
+    Суммы за сегодня/неделю/месяц сознательно НЕ считаем: их браузер
+    получает из того же ряда сложением. Это экономит три агрегирующих
+    запроса к БД на каждое обращение, а данные и так уже переданы.
+    """
     today = date.today()
     try:
         with _lock, _connect() as conn:
-            result = {
-                "today": _sum_since(conn, today.isoformat()),
-                "week": _sum_since(conn, (today - timedelta(days=6)).isoformat()),
-                "month": _sum_since(conn, (today - timedelta(days=29)).isoformat()),
-                "all": _sum_since(conn, None),
-            }
+            result = {"all": _sum_since(conn, None)}
             # ряд за 30 дней для графика (пропуски заполняем нулями)
             since = (today - timedelta(days=29)).isoformat()
             rows = {r[0]: r[1:] for r in conn.execute(

@@ -6,9 +6,12 @@
 <title>Статистика — yt.zapret.moe</title>
 <meta name="description" content="Обезличенные счётчики нагрузки сервиса.">
 <meta name="robots" content="noindex">
-<link rel="preconnect" href="https://fonts.googleapis.com">
-<link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
-<link href="https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700&display=swap" rel="stylesheet">
+<!-- Шрифт размещён локально: внешний запрос к Google блокировал отрисовку
+     и попутно отдавал им IP каждого посетителя. -->
+<link rel="preload" as="font" type="font/woff2" crossorigin
+      href="{{ url_for('static', filename='fonts/inter-400-cyrillic.woff2') }}">
+<link rel="preload" as="font" type="font/woff2" crossorigin
+      href="{{ url_for('static', filename='fonts/inter-600-cyrillic.woff2') }}">
 <link rel="stylesheet" href="{{ url_for('static', filename='style.css') }}">
 </head>
 <body>
@@ -168,23 +171,74 @@ const plural = (n, one, few, many) => {
   return many;
 };
 
-let DATA = null, period = "today", metric = "bytes_served";
+/* ---------- Данные ----------
+   Страница приходит с сервера уже с цифрами (INITIAL), поэтому прочерки
+   не мигают и первый запрос к API не нужен вовсе. Дальше главный источник
+   — кэш в localStorage: к серверу идём, только когда кэш протух. */
+const INITIAL = {{ initial|tojson }};
+const LS_CACHE = "ytgrab.cache.v1";
+const CACHE_TTL_MS = 60000;
 
-async function load() {
-  let r;
+const cache = {
+  read() {
+    try { return JSON.parse(localStorage.getItem(LS_CACHE) || "null"); }
+    catch { return null; }
+  },
+  write(patch) {
+    try {
+      const cur = cache.read() || {};
+      localStorage.setItem(LS_CACHE, JSON.stringify({ ...cur, ...patch, at: Date.now() }));
+    } catch { /* приватный режим — просто живём без кэша */ }
+  },
+  fresh() {
+    const c = cache.read();
+    return c && c.at && (Date.now() - c.at) < CACHE_TTL_MS;
+  }
+};
+
+let period = "today", metric = "bytes_served";
+let DATA = INITIAL.stats || cache.read()?.stats || null;
+
+/* Суммы за период считаем в браузере из того же ряда по дням, который уже
+   получен. Сервер их больше не агрегирует — это три лишних запроса к БД. */
+const COUNTERS = ["api_info","downloads_started","downloads_done",
+                  "downloads_failed","files_served","bytes_served"];
+
+function periodTotals(p) {
+  if (!DATA) return {};
+  if (p === "all") return DATA.all || {};
+  const days = p === "today" ? 1 : p === "week" ? 7 : 30;
+  const series = (DATA.series || []).slice(-days);
+  const out = {};
+  COUNTERS.forEach(c => { out[c] = series.reduce((s, d) => s + (d[c] || 0), 0); });
+  return out;
+}
+
+async function load(force) {
+  // к серверу идём, только если кэш протух или нас попросили явно
+  if (!force && cache.fresh()) return;
   try {
-    r = await fetch("/api/stats");
+    const r = await fetch("/api/stats");
     if (!r.ok) throw new Error(r.status === 429
       ? "Слишком много запросов — подождите немного"
       : `Сервер ответил ${r.status}`);
     DATA = await r.json();
+    cache.write({ stats: DATA });
   } catch (e) {
-    // молчать нельзя: иначе пустые плитки выглядят как «нет данных»
-    $("#load-error-text").textContent = e.message;
-    $("#load-error").classList.remove("hidden");
+    // Показываем ошибку, только если показывать вообще нечего.
+    // Если данные уже на экране — молча живём со старыми.
+    if (!DATA) {
+      $("#load-error-text").textContent = e.message;
+      $("#load-error").classList.remove("hidden");
+    }
     return;
   }
   $("#load-error").classList.add("hidden");
+  renderAll();
+}
+
+function renderAll() {
+  if (!DATA) return;
   render();
   renderChart();
   if (DATA.since) {
@@ -196,7 +250,7 @@ async function load() {
 }
 
 function render() {
-  const d = DATA[period] || {};
+  const d = periodTotals(period);
   $("#v-bytes").textContent   = fmtBytes(d.bytes_served);
   $("#v-files").textContent   = fmtNum(d.files_served) + " " +
     plural(d.files_served || 0, "файл отдан", "файла отдано", "файлов отдано");
@@ -316,13 +370,24 @@ async function loadFeed(reset) {
       ? "Слишком много запросов — подождите немного"
       : `Сервер ответил ${r.status}`);
     d = await r.json();
+    if (feedOrder === "recent" && feedOffset === 0) cache.write({ feed: d });
   } catch (e) {
+    // Есть что показать из кэша — показываем его, а не ошибку.
+    const c = cache.read();
+    if (reset && feedOrder === "recent" && c && c.feed) {
+      applyFeed(c.feed);
+      return;
+    }
     // «Пока пусто» здесь было бы ложью — данные есть, их просто не отдали
     $("#feed-empty").classList.add("hidden");
     $("#feed-error-text").textContent = e.message;
     $("#feed-error").classList.remove("hidden");
     return;
   }
+  applyFeed(d);
+}
+
+function applyFeed(d) {
   $("#feed-error").classList.add("hidden");
   const items = d.items || [];
 
@@ -378,9 +443,24 @@ document.querySelectorAll("#feed-seg button").forEach(b =>
   }));
 $("#feed-more").addEventListener("click", () => loadFeed(false));
 
-load();
-loadFeed(true);
-setInterval(load, 30000);
+/* ---------- Старт ----------
+   Рисуем синхронно из данных, пришедших вместе со страницей: никакого
+   мигания прочерков и ни одного запроса к API на обычной загрузке. */
+renderAll();
+cache.write({ stats: DATA, feed: INITIAL.feed });
+if (INITIAL.feed) applyFeed(INITIAL.feed);
+
+/* Обновляем только когда вкладка на виду и кэш протух. */
+setInterval(() => {
+  if (document.visibilityState === "visible" && !cache.fresh()) {
+    load(); loadFeed(true);
+  }
+}, 30000);
+document.addEventListener("visibilitychange", () => {
+  if (document.visibilityState === "visible" && !cache.fresh()) {
+    load(); loadFeed(true);
+  }
+});
 </script>
 </body>
 </html>

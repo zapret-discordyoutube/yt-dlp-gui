@@ -172,15 +172,21 @@ def api_download():
     if thumb and not str(thumb).startswith(("http://", "https://")):
         thumb = None
 
-    task = manager.create(url=url, fmt=fmt, extra=extra, label=label,
-                          title=title, thumbnail=thumb)
+    try:
+        task = manager.create(url=url, fmt=fmt, extra=extra, label=label,
+                              title=title, thumbnail=thumb)
+    except dl.Overloaded:
+        # честный отказ сразу, а не молчаливое ожидание в очереди
+        return err("Сервис сейчас перегружен, попробуйте через пару минут", 503)
     stats.bump("downloads_started")
     return jsonify(task.public()), 201
 
 
-@app.get("/api/tasks")
-def api_tasks():
-    return jsonify(manager.list())
+# Списка задач здесь сознательно нет.
+# Раньше GET /api/tasks отдавал карточки ВСЕХ пользователей вместе с их
+# ссылками и названиями, а по найденному там id можно было забрать чужой
+# готовый файл: единственной защитой была неугадываемость id, и список её
+# обнулял. Доступ к задаче — только по её идентификатору.
 
 
 @app.get("/api/tasks/<tid>")
@@ -254,9 +260,19 @@ def api_file(tid):
     return resp
 
 
+def _cacheable(resp, seconds: int):
+    """Короткое кэширование в браузере.
+
+    Данные меняются медленно, а частая перезагрузка страницы иначе
+    превращается в поток одинаковых запросов и упирается в rate limit.
+    """
+    resp.headers["Cache-Control"] = f"public, max-age={seconds}"
+    return resp
+
+
 @app.get("/api/stats")
 def api_stats():
-    return jsonify(stats.summary())
+    return _cacheable(jsonify(stats.summary()), 15)
 
 
 @app.get("/api/feed")
@@ -266,15 +282,24 @@ def api_feed():
         offset = max(0, int(request.args.get("offset", 0)))
     except ValueError:
         offset = 0
-    return jsonify({
+    return _cacheable(jsonify({
         "items": stats.feed(order=order, limit=config.FEED_PAGE_SIZE, offset=offset),
         "totals": stats.feed_totals(),
-    })
+    }), 15)
 
 
 @app.get("/stats")
 def stats_page():
-    return render_template("stats.html")
+    # Данные вшиваются прямо в страницу: иначе она сначала рисуется с
+    # прочерками и только потом, после асинхронного запроса, показывает
+    # цифры — заметное мигание при каждой загрузке.
+    return render_template("stats.html", initial={
+        "stats": stats.summary(),
+        "feed": {
+            "items": stats.feed(order="recent", limit=config.FEED_PAGE_SIZE),
+            "totals": stats.feed_totals(),
+        },
+    })
 
 
 if __name__ == "__main__":
