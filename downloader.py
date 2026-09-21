@@ -440,12 +440,14 @@ def _img_ext(content_type: str | None, url: str) -> str:
 
 # Признаки того, что контент забанен/недоступен ИМЕННО с этого IP или в
 # регионе — тогда осмысленно повторить через запасной egress-прокси.
+# Только явный бан по IP/региону. 403 сюда НЕ входит: у YouTube он часто
+# транзиентный, и повтор через медленный egress лишь замедлял бы загрузку.
 _BAN_SIGNATURES = (
     "your ip address is blocked", "ip address is blocked",
     "not available in your country", "not available from your location",
     "not available in your region", "geo restricted", "geo-restricted",
     "blocked it in your country", "this content is not available in your",
-    "http error 403", "403: forbidden",
+    "video is not available from your",
 )
 
 
