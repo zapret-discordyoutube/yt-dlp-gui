@@ -76,7 +76,10 @@ def record_download(url: str) -> None:
     """Отметить факт скачивания ролика. Сохраняем адрес, дату и счётчик."""
     if not config.FEED_ENABLED or not url:
         return
-    now = datetime.now(timezone.utc).isoformat(timespec="seconds")
+    # Точность до микросекунд, а не до секунды: иначе записи, сделанные в
+    # одну секунду, получают одинаковую метку, и порядок «недавних»
+    # становится произвольным.
+    now = datetime.now(timezone.utc).isoformat()
     try:
         with _lock, _connect() as conn:
             conn.execute(
@@ -87,6 +90,52 @@ def record_download(url: str) -> None:
                 (url, now, now))
     except sqlite3.Error:
         pass
+
+
+def selftest() -> None:
+    """Проверить, что БД действительно пишется. Ошибки НЕ глушим:
+    это единственное место, где сбой хранилища должен быть заметен."""
+    with _lock, _connect() as conn:
+        conn.execute("CREATE TABLE IF NOT EXISTS _probe (k INTEGER PRIMARY KEY)")
+        conn.execute("INSERT OR REPLACE INTO _probe(k) VALUES (1)")
+        conn.execute("DELETE FROM _probe")
+
+
+def migrate_feed(canonicalize) -> int:
+    """Привести уже накопленные ссылки к каноническому виду.
+
+    Записи, схлопнувшиеся в одну, объединяются: счётчики складываются,
+    первая дата берётся самая ранняя, последняя — самая поздняя.
+    Функция канонизации передаётся снаружи, чтобы этот модуль не зависел
+    от логики разбора ссылок.
+    """
+    try:
+        with _lock, _connect() as conn:
+            rows = conn.execute(
+                "SELECT url, first_seen, last_seen, count FROM feed").fetchall()
+            merged: dict[str, list] = {}
+            changed = False
+            for url, first, last, cnt in rows:
+                key = canonicalize(url)
+                if key != url:
+                    changed = True
+                if key in merged:
+                    m = merged[key]
+                    m[0] = min(m[0], first)
+                    m[1] = max(m[1], last)
+                    m[2] += cnt
+                else:
+                    merged[key] = [first, last, cnt]
+            if not changed:
+                return 0
+            conn.execute("DELETE FROM feed")
+            conn.executemany(
+                "INSERT INTO feed(url, first_seen, last_seen, count) "
+                "VALUES (?, ?, ?, ?)",
+                [(u, v[0], v[1], v[2]) for u, v in merged.items()])
+            return len(rows) - len(merged)
+    except sqlite3.Error:
+        return 0
 
 
 def feed(order: str = "recent", limit: int = 50, offset: int = 0) -> list[dict]:

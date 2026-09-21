@@ -13,7 +13,7 @@ import time
 import uuid
 from dataclasses import dataclass, field
 from pathlib import Path
-from urllib.parse import urlparse
+from urllib.parse import parse_qs, parse_qsl, urlencode, urlparse, urlunparse
 
 import yt_dlp
 
@@ -151,6 +151,68 @@ def build_from_format_id(format_id: str, container: str = "auto") -> tuple[str, 
         extra["merge_output_format"] = (
             container if container in _MERGE_CONTAINERS else "mkv")
     return fid, extra, f"формат {fid}"
+
+
+# Параметры, не влияющие на то, какой это ролик: метки переходов, тайм-коды,
+# идентификаторы сессий. Их нельзя публиковать и нельзя учитывать при
+# сравнении ссылок.
+_JUNK_QUERY = {
+    "utm_source", "utm_medium", "utm_campaign", "utm_term", "utm_content",
+    "feature", "fbclid", "gclid", "yclid", "si", "pp", "t", "start",
+    "ref", "ref_src", "referrer", "from", "app", "_r", "rtc", "list", "index",
+    # Похожее на секреты выбрасываем всегда: лучше потерять работоспособность
+    # ссылки в ленте, чем опубликовать чужой токен доступа.
+    "token", "access_token", "auth", "authorization", "key", "api_key",
+    "apikey", "session", "sessionid", "sid", "signature", "sig", "hash",
+    "password", "pwd", "secret",
+}
+
+_YT_HOSTS = {"youtube.com", "m.youtube.com", "music.youtube.com", "youtu.be"}
+_VK_HOSTS = {"vk.com", "vk.ru", "m.vk.com", "vkvideo.ru"}
+
+
+def canonical_url(url: str) -> str:
+    """Привести ссылку к единому виду для публичной ленты.
+
+    Решает две задачи сразу:
+    * один ролик — одна запись. Без этого `youtu.be/X`, `youtube.com/watch?v=X`
+      и та же ссылка с тайм-кодом считались тремя разными роликами, и счётчик
+      популярности размазывался;
+    * из ссылки убирается всё лишнее. Query-строка может нести метки перехода
+      и идентификаторы сессии, а лента публичная — публиковать их нельзя.
+    """
+    try:
+        p = urlparse((url or "").strip())
+    except ValueError:
+        return url
+    host = (p.hostname or "").lower().removeprefix("www.")
+    path = p.path.rstrip("/")
+
+    if host in _YT_HOSTS:
+        vid = None
+        if host == "youtu.be":
+            vid = path.lstrip("/").split("/")[0] or None
+        elif path == "/watch":
+            vid = parse_qs(p.query).get("v", [None])[0]
+        else:
+            m = re.match(r"^/(?:shorts|embed|live|v)/([\w-]+)", path)
+            if m:
+                vid = m.group(1)
+        if vid and re.fullmatch(r"[\w-]{6,20}", vid):
+            return f"https://www.youtube.com/watch?v={vid}"
+
+    if host in _VK_HOSTS:
+        m = re.match(r"^/(?:video|clip)(-?\d+_\d+)", path)
+        if m:
+            return f"https://vkvideo.ru/video{m.group(1)}"
+
+    # Общий случай: нормализуем схему и хост, отбрасываем якорь и мусорные
+    # параметры, оставшиеся упорядочиваем — чтобы порядок не плодил дубликаты.
+    keep = sorted((k, v) for k, v in parse_qsl(p.query, keep_blank_values=False)
+                  if k.lower() not in _JUNK_QUERY)
+    query = urlencode(keep)
+    scheme = "https" if p.scheme in ("http", "https") else p.scheme
+    return urlunparse((scheme, host, path or "/", "", query, ""))
 
 
 def _is_public_host(host: str) -> bool:
@@ -319,6 +381,10 @@ class DownloadManager:
         # Раньше каждая задача поднимала свой поток, который до получаса ждал
         # на семафоре: шесть запусков в минуту с одного адреса давали около
         # 180 висящих потоков при TasksMax=256, и сервис ложился с двух IP.
+        # Время последнего УСПЕШНОГО прохода уборщика. Нужно для /readyz:
+        # если уборщик тихо умер, файлы перестанут удаляться, диск заполнится,
+        # и без этого признака поломка будет невидима.
+        self.last_janitor_ok = time.time()
         self.queue: queue.Queue = queue.Queue(maxsize=config.QUEUE_MAX)
         for _ in range(config.MAX_CONCURRENT_DOWNLOADS):
             threading.Thread(target=self._worker, daemon=True).start()
@@ -401,6 +467,7 @@ class DownloadManager:
                 try:
                     self._janitor_pass()
                     fails = 0
+                    self.last_janitor_ok = time.time()
                 except Exception:
                     # Молчать нельзя: если уборщик умер (например, каталог
                     # стал недоступен на запись), файлы перестают удаляться,
@@ -452,6 +519,25 @@ class DownloadManager:
 
     def pending(self) -> int:
         return self.queue.qsize()
+
+    def health(self) -> dict:
+        """Фактическое состояние: диск, очередь, задачи, уборщик."""
+        try:
+            usage = shutil.disk_usage(config.DOWNLOAD_DIR)
+            free_mb = round(usage.free / 1048576)
+        except OSError:
+            free_mb = None
+        with self.lock:
+            tasks = list(self.tasks.values())
+        active = sum(1 for t in tasks if t.status in ("downloading", "processing"))
+        return {
+            "free_disk_mb": free_mb,
+            "downloads_mb": round(self._dir_size_mb(), 1),
+            "tasks_total": len(tasks),
+            "tasks_active": active,
+            "queue_pending": self.pending(),
+            "janitor_age_sec": round(time.time() - self.last_janitor_ok),
+        }
 
     def get(self, tid: str) -> Task | None:
         with self.lock:

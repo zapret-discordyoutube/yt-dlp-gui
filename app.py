@@ -4,6 +4,7 @@ from __future__ import annotations
 import json
 import logging
 import os
+import shutil
 import threading
 import time
 from collections import defaultdict, deque
@@ -28,13 +29,18 @@ if config.QUIET_ACCESS_LOG:
 
 manager = dl.DownloadManager()
 stats.init()
+_merged = stats.migrate_feed(dl.canonical_url)
+if _merged:
+    logging.info("лента: схлопнуто дубликатов ссылок — %d", _merged)
 
 
 def _task_finished(task) -> None:
     """Считаем исход задачи. Пишем только числа, без URL и заголовков."""
     if task.status == "finished":
         stats.bump("downloads_done")
-        stats.record_download(task.url)
+        # В ленту идёт приведённая ссылка: один ролик — одна запись,
+        # и в публичную выдачу не попадают метки перехода и токены.
+        stats.record_download(dl.canonical_url(task.url))
     elif task.status == "error":
         stats.bump("downloads_failed")
 
@@ -87,6 +93,26 @@ def err(msg: str, code: int = 400):
     return jsonify({"error": msg}), code
 
 
+# Единая карта сообщений: раньше словари дублировались в двух ручках и
+# успели разойтись — на одну и ту же ссылку /api/info отвечал «Этот адрес
+# недоступен», а /api/downloads глотал код и говорил «Плохая ссылка».
+_MESSAGES = {
+    "empty_or_too_long": "Пустая или слишком длинная ссылка",
+    "bad_scheme": "Нужна ссылка http:// или https://",
+    "private_host": "Этот адрес недоступен",
+    "bad_format_id": "Недопустимый формат",
+    "unknown_acodec": "Неизвестный аудиокодек",
+    "unknown_vcodec": "Неизвестный видеокодек",
+    "unknown_vaudio": "Неизвестный формат звука",
+    "unknown_height": "Неизвестное разрешение",
+    "unknown_kind": "Неизвестный тип",
+}
+
+
+def message_for(e: Exception, default: str) -> str:
+    return _MESSAGES.get(str(e), default)
+
+
 @app.after_request
 def security_headers(resp):
     resp.headers.setdefault("X-Content-Type-Options", "nosniff")
@@ -104,6 +130,38 @@ def index():
     })
 
 
+@app.get("/readyz")
+def readyz():
+    """Настоящая проверка готовности, в отличие от /healthz.
+
+    /healthz отвечает «жив» даже когда диск полон, уборщик мёртв, БД не
+    пишется, а ffmpeg отсутствует. Здесь проверяется то, без чего сервис
+    фактически не работает, и при деградации отдаётся 503 — чтобы поломку
+    было видно мониторингу, а не только пользователям.
+    """
+    h = manager.health()
+    checks = {}
+
+    checks["ffmpeg"] = shutil.which("ffmpeg") is not None
+
+    try:
+        stats.selftest()
+        checks["stats_db"] = True
+    except Exception:
+        checks["stats_db"] = False
+
+    checks["disk_free"] = (h["free_disk_mb"] is not None
+                           and h["free_disk_mb"] >= config.MIN_FREE_DISK_MB)
+    checks["disk_quota"] = h["downloads_mb"] < config.DISK_QUOTA_MB
+    # уборщик должен отрабатывать регулярно; тройной интервал — запас
+    checks["janitor"] = h["janitor_age_sec"] < config.JANITOR_INTERVAL_SEC * 3 + 30
+    checks["queue"] = h["queue_pending"] < config.QUEUE_MAX
+
+    ok = all(checks.values())
+    return jsonify({"ok": ok, "checks": checks, "metrics": h,
+                    "version": dl.yt_dlp.version.__version__}), (200 if ok else 503)
+
+
 @app.get("/healthz")
 def healthz():
     return jsonify({"ok": True, "version": dl.yt_dlp.version.__version__})
@@ -117,9 +175,7 @@ def api_info():
     try:
         url = dl.validate_url(data.get("url", ""))
     except ValueError as e:
-        return err({"empty_or_too_long": "Пустая или слишком длинная ссылка",
-                    "private_host": "Этот адрес недоступен",
-                    "bad_scheme": "Нужна ссылка http:// или https://"}.get(str(e), "Плохая ссылка"))
+        return err(message_for(e, "Плохая ссылка"))
     try:
         info = dl.probe(url)
         stats.bump("api_info")
@@ -144,8 +200,8 @@ def api_download():
     data = request.get_json(silent=True) or {}
     try:
         url = dl.validate_url(data.get("url", ""))
-    except ValueError:
-        return err("Плохая ссылка")
+    except ValueError as e:
+        return err(message_for(e, "Плохая ссылка"))
 
     try:
         if data.get("format_id"):
@@ -160,12 +216,7 @@ def api_download():
                 vaudio=str(data.get("vaudio", "auto")),
             )
     except ValueError as e:
-        return err({"bad_format_id": "Недопустимый формат",
-                    "unknown_acodec": "Неизвестный аудиокодек",
-                    "unknown_vcodec": "Неизвестный видеокодек",
-                    "unknown_vaudio": "Неизвестный формат звука",
-                    "unknown_height": "Неизвестное разрешение",
-                    "unknown_kind": "Неизвестный тип"}.get(str(e), "Неверный выбор формата"))
+        return err(message_for(e, "Неверный выбор формата"))
 
     title = str(data.get("title") or "Видео")[:200]
     thumb = data.get("thumbnail")
@@ -197,8 +248,12 @@ def api_task(tid):
 
 @app.post("/api/tasks/<tid>/cancel")
 def api_cancel(tid):
+    # Различаем «задачи нет» и «отменять нечего»: раньше несуществующая
+    # задача давала 409, хотя соседние ручки на неё отвечают 404.
+    if not manager.get(tid):
+        return err("Задача не найдена", 404)
     return (jsonify({"cancelled": True}) if manager.cancel(tid)
-            else err("Нечего отменять", 409))
+            else err("Задача уже завершена", 409))
 
 
 @app.get("/api/tasks/<tid>/progress")
