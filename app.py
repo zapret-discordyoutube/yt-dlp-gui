@@ -14,6 +14,7 @@ from werkzeug.middleware.proxy_fix import ProxyFix
 
 import config
 import downloader as dl
+import stats
 
 app = Flask(__name__)
 app.config["JSON_AS_ASCII"] = False
@@ -26,6 +27,18 @@ if config.QUIET_ACCESS_LOG:
     logging.getLogger("werkzeug").setLevel(logging.WARNING)
 
 manager = dl.DownloadManager()
+stats.init()
+
+
+def _task_finished(task) -> None:
+    """Считаем исход задачи. Пишем только числа, без URL и заголовков."""
+    if task.status == "finished":
+        stats.bump("downloads_done")
+    elif task.status == "error":
+        stats.bump("downloads_failed")
+
+
+manager.on_complete = _task_finished
 
 # --- простой in-memory rate limit по IP ---
 _hits: dict[str, deque] = defaultdict(deque)
@@ -84,9 +97,12 @@ def api_info():
         url = dl.validate_url(data.get("url", ""))
     except ValueError as e:
         return err({"empty_or_too_long": "Пустая или слишком длинная ссылка",
+                    "private_host": "Этот адрес недоступен",
                     "bad_scheme": "Нужна ссылка http:// или https://"}.get(str(e), "Плохая ссылка"))
     try:
-        return jsonify(dl.probe(url))
+        info = dl.probe(url)
+        stats.bump("api_info")
+        return jsonify(info)
     except ValueError as e:
         if str(e) == "too_long":
             return err(f"Слишком длинное видео (лимит {config.MAX_DURATION_SEC // 3600} ч)")
@@ -118,13 +134,15 @@ def api_download():
             fmt, extra, label = dl.build_format(
                 kind=str(data.get("kind", "video")),
                 height=str(data.get("height", "auto")),
-                acodec=str(data.get("acodec", "mp3")),
-                vcontainer=str(data.get("container", "mp4")),
+                acodec=str(data.get("acodec", "best")),
+                vcodec=str(data.get("vcodec", "auto")),
+                vaudio=str(data.get("vaudio", "auto")),
             )
     except ValueError as e:
         return err({"bad_format_id": "Недопустимый формат",
                     "unknown_acodec": "Неизвестный аудиокодек",
-                    "unknown_container": "Неизвестный контейнер",
+                    "unknown_vcodec": "Неизвестный видеокодек",
+                    "unknown_vaudio": "Неизвестный формат звука",
                     "unknown_height": "Неизвестное разрешение",
                     "unknown_kind": "Неизвестный тип"}.get(str(e), "Неверный выбор формата"))
 
@@ -135,6 +153,7 @@ def api_download():
 
     task = manager.create(url=url, fmt=fmt, extra=extra, label=label,
                           title=title, thumbnail=thumb)
+    stats.bump("downloads_started")
     return jsonify(task.public()), 201
 
 
@@ -199,9 +218,23 @@ def api_file(tid):
     # и WSGI закрывает файловую обёртку, а не Response — колбэк не сработает.
     resp = send_file(path, as_attachment=True,
                      download_name=t.display_name or t.filename)
+    if t.served_at is None:
+        # считаем только первую выдачу, чтобы докачка не удваивала цифры
+        stats.bump("files_served")
+        stats.bump("bytes_served", t.filesize or 0)
     if config.DELETE_AFTER_SERVE and t.served_at is None:
         t.served_at = time.time()
     return resp
+
+
+@app.get("/api/stats")
+def api_stats():
+    return jsonify(stats.summary())
+
+
+@app.get("/stats")
+def stats_page():
+    return render_template("stats.html")
 
 
 if __name__ == "__main__":

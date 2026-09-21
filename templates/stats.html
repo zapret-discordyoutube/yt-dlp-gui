@@ -1,0 +1,216 @@
+<!DOCTYPE html>
+<html lang="ru" data-theme="dark">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
+<title>Статистика — yt.zapret.moe</title>
+<meta name="description" content="Обезличенные счётчики нагрузки сервиса.">
+<meta name="robots" content="noindex">
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+<link href="https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700&display=swap" rel="stylesheet">
+<link rel="stylesheet" href="{{ url_for('static', filename='style.css') }}">
+</head>
+<body>
+
+<header class="topbar">
+  <div class="wrap topbar__in">
+    <div class="brand">
+      <span class="brand__mark" aria-hidden="true">▼</span>
+      <span>yt-grab <span class="brand__sub">· статистика</span></span>
+    </div>
+    <nav class="topnav">
+      <a href="/">На главную</a>
+      <button class="icon-btn" id="theme-toggle" aria-label="Сменить тему" title="Сменить тему"><svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" aria-hidden="true"><path d="M21 12.8A9 9 0 1 1 11.2 3a7 7 0 0 0 9.8 9.8z"/></svg></button>
+    </nav>
+  </div>
+</header>
+
+<main class="wrap">
+
+  <section class="hero" style="padding-bottom:var(--s-4)">
+    <h1 style="font-size:28px">Как пользуются сервисом</h1>
+    <p>Обезличенные счётчики: сколько запросов и сколько отдано. Без ссылок, IP и привязки к людям.</p>
+  </section>
+
+  <!-- Переключатель периода -->
+  <div style="display:flex; justify-content:center; margin-bottom:var(--s-6)">
+    <div class="seg" id="period-seg" role="radiogroup" aria-label="Период">
+      <button type="button" role="radio" data-period="today" aria-checked="true">Сегодня</button>
+      <button type="button" role="radio" data-period="week"  aria-checked="false">Неделя</button>
+      <button type="button" role="radio" data-period="month" aria-checked="false">Месяц</button>
+      <button type="button" role="radio" data-period="all"   aria-checked="false">Всё время</button>
+    </div>
+  </div>
+
+  <!-- Плитки -->
+  <div class="tiles" id="tiles">
+    <div class="tile">
+      <div class="tile__label">Отдано данных</div>
+      <div class="tile__value" id="v-bytes">—</div>
+      <div class="tile__sub" id="v-files">—</div>
+    </div>
+    <div class="tile">
+      <div class="tile__label">Скачиваний</div>
+      <div class="tile__value" id="v-done">—</div>
+      <div class="tile__sub" id="v-started">—</div>
+    </div>
+    <div class="tile">
+      <div class="tile__label">Запросов к API</div>
+      <div class="tile__value" id="v-api">—</div>
+      <div class="tile__sub">разборов ссылок</div>
+    </div>
+    <div class="tile">
+      <div class="tile__label">Доля успешных</div>
+      <div class="tile__value" id="v-rate">—</div>
+      <div class="tile__sub" id="v-failed">—</div>
+    </div>
+  </div>
+
+  <!-- График -->
+  <section class="section">
+    <div class="section__head">
+      <h2>За последние 30 дней</h2>
+      <div class="seg" id="metric-seg" role="radiogroup" aria-label="Показатель" style="padding:2px">
+        <button type="button" role="radio" data-metric="bytes_served" aria-checked="true"
+                style="padding:6px 10px; font-size:12px">Байты</button>
+        <button type="button" role="radio" data-metric="downloads_done" aria-checked="false"
+                style="padding:6px 10px; font-size:12px">Скачивания</button>
+        <button type="button" role="radio" data-metric="api_info" aria-checked="false"
+                style="padding:6px 10px; font-size:12px">Запросы</button>
+      </div>
+    </div>
+    <div class="card">
+      <div class="chart" id="chart" role="img" aria-label="Активность за 30 дней"></div>
+      <div class="chart__axis">
+        <span id="axis-from"></span>
+        <span id="axis-to"></span>
+      </div>
+    </div>
+  </section>
+
+  <section class="section">
+    <div class="note">
+      <span aria-hidden="true">🔒</span>
+      <span>Здесь только суммы. Сервер не записывает, какие ссылки вставляли, с каких адресов и кто
+      что скачал — по этим числам невозможно восстановить ничьи действия.
+      <span id="since-note"></span></span>
+    </div>
+  </section>
+
+  <footer>
+    <a href="/">yt-grab</a> — обёртка над
+    <a href="https://github.com/yt-dlp/yt-dlp" rel="noopener noreferrer" target="_blank">yt-dlp</a>.
+  </footer>
+</main>
+
+<script>
+"use strict";
+const $ = (s) => document.querySelector(s);
+
+/* тема — та же настройка, что и на главной */
+try {
+  const s = JSON.parse(localStorage.getItem("ytgrab.settings.v1") || "{}");
+  if (s.theme) document.documentElement.setAttribute("data-theme", s.theme);
+} catch { /* приватный режим */ }
+$("#theme-toggle").addEventListener("click", () => {
+  const next = document.documentElement.getAttribute("data-theme") === "dark" ? "light" : "dark";
+  document.documentElement.setAttribute("data-theme", next);
+  try {
+    const s = JSON.parse(localStorage.getItem("ytgrab.settings.v1") || "{}");
+    s.theme = next;
+    localStorage.setItem("ytgrab.settings.v1", JSON.stringify(s));
+  } catch { /* приватный режим */ }
+});
+
+const fmtBytes = (b) => {
+  if (!b) return "0 B";
+  const u = ["B","KB","MB","GB","TB"]; let i = 0, n = b;
+  while (n >= 1024 && i < u.length - 1) { n /= 1024; i++; }
+  return `${n.toFixed(n >= 100 || i === 0 ? 0 : 1)} ${u[i]}`;
+};
+const fmtNum = (n) => (n || 0).toLocaleString("ru-RU");
+const plural = (n, one, few, many) => {
+  const m10 = n % 10, m100 = n % 100;
+  if (m10 === 1 && m100 !== 11) return one;
+  if (m10 >= 2 && m10 <= 4 && (m100 < 10 || m100 >= 20)) return few;
+  return many;
+};
+
+let DATA = null, period = "today", metric = "bytes_served";
+
+async function load() {
+  const r = await fetch("/api/stats");
+  DATA = await r.json();
+  render();
+  renderChart();
+  if (DATA.since) {
+    const d = new Date(DATA.since + "T00:00:00");
+    // локаль уже добавляет «г.», своя точка дала бы «2026 г..»
+    $("#since-note").textContent = "Счёт идёт с " +
+      d.toLocaleDateString("ru-RU", { day: "numeric", month: "long", year: "numeric" });
+  }
+}
+
+function render() {
+  const d = DATA[period] || {};
+  $("#v-bytes").textContent   = fmtBytes(d.bytes_served);
+  $("#v-files").textContent   = fmtNum(d.files_served) + " " +
+    plural(d.files_served || 0, "файл отдан", "файла отдано", "файлов отдано");
+  $("#v-done").textContent    = fmtNum(d.downloads_done);
+  $("#v-started").textContent = "запущено " + fmtNum(d.downloads_started);
+  $("#v-api").textContent     = fmtNum(d.api_info);
+
+  const done = d.downloads_done || 0, failed = d.downloads_failed || 0;
+  const total = done + failed;
+  $("#v-rate").textContent    = total ? Math.round(done / total * 100) + "%" : "—";
+  $("#v-failed").textContent  = failed
+    ? fmtNum(failed) + " " + plural(failed, "ошибка", "ошибки", "ошибок")
+    : "без ошибок";
+}
+
+function renderChart() {
+  const series = DATA.series || [];
+  const box = $("#chart");
+  box.innerHTML = "";
+  if (!series.length) { box.innerHTML = '<div class="empty">Пока нет данных</div>'; return; }
+  const max = Math.max(...series.map(s => s[metric] || 0), 1);
+  series.forEach(s => {
+    const v = s[metric] || 0;
+    const bar = document.createElement("div");
+    bar.className = "bar" + (v === 0 ? " bar--empty" : "");
+    // минимальная видимая высота у ненулевых значений, чтобы их было заметно
+    bar.style.height = v === 0 ? "2px" : Math.max(4, v / max * 100) + "%";
+    const shown = metric === "bytes_served" ? fmtBytes(v) : fmtNum(v);
+    const day = new Date(s.day + "T00:00:00")
+      .toLocaleDateString("ru-RU", { day: "numeric", month: "short" });
+    bar.title = `${day}: ${shown}`;
+    box.appendChild(bar);
+  });
+  const fmtDay = (iso) => new Date(iso + "T00:00:00")
+    .toLocaleDateString("ru-RU", { day: "numeric", month: "short" });
+  $("#axis-from").textContent = fmtDay(series[0].day);
+  $("#axis-to").textContent   = fmtDay(series[series.length - 1].day);
+}
+
+document.querySelectorAll("#period-seg button").forEach(b =>
+  b.addEventListener("click", () => {
+    period = b.dataset.period;
+    document.querySelectorAll("#period-seg button").forEach(x =>
+      x.setAttribute("aria-checked", String(x === b)));
+    render();
+  }));
+
+document.querySelectorAll("#metric-seg button").forEach(b =>
+  b.addEventListener("click", () => {
+    metric = b.dataset.metric;
+    document.querySelectorAll("#metric-seg button").forEach(x =>
+      x.setAttribute("aria-checked", String(x === b)));
+    renderChart();
+  }));
+
+load();
+setInterval(load, 30000);
+</script>
+</body>
+</html>

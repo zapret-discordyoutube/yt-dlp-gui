@@ -41,6 +41,7 @@ PrivateTmp=yes
 ProtectSystem=strict
 ProtectHome=read-only
 ReadWritePaths=/home/codex-pve/ytdlp-gui/downloads
+ReadWritePaths=/home/codex-pve/ytdlp-gui/data
 ProtectKernelTunables=yes
 ProtectKernelModules=yes
 ProtectControlGroups=yes

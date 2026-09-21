@@ -8,319 +8,7 @@
 <link rel="preconnect" href="https://fonts.googleapis.com">
 <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
 <link href="https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700&display=swap" rel="stylesheet">
-<style>
-:root{
-  color-scheme: dark;
-  --bg:#0a0a0c; --surface-1:#121216; --surface-2:#17171d; --surface-3:#1e1e26;
-  --overlay:rgba(0,0,0,.6);
-  --border:#26262e; --border-strong:#34343f;
-  --text:#ededf2; --text-secondary:#b8b8c2; --text-muted:#7a7a88; --text-inverse:#0a0a0c;
-  --accent:#6d6def; --accent-hover:#7f7ff2; --accent-active:#5b5bd6;
-  --accent-soft:rgba(109,109,239,.14); --accent-ring:rgba(109,109,239,.45);
-  --success:#3ecf8e; --success-soft:rgba(62,207,142,.14);
-  --warning:#f5a524; --danger:#f75f5f; --danger-soft:rgba(247,95,95,.14);
-  --r-xs:6px; --r-sm:8px; --r-md:12px; --r-lg:16px; --r-xl:22px; --r-full:999px;
-  --shadow-sm:0 1px 2px rgba(0,0,0,.4);
-  --shadow-md:0 4px 16px rgba(0,0,0,.35),0 1px 2px rgba(0,0,0,.4);
-  --shadow-lg:0 12px 40px rgba(0,0,0,.45);
-  --shadow-focus:0 0 0 3px var(--accent-ring);
-  --s-1:4px; --s-2:8px; --s-3:12px; --s-4:16px; --s-5:20px; --s-6:24px; --s-8:32px; --s-10:40px; --s-12:48px;
-  --ease:cubic-bezier(.2,.7,.3,1); --dur-fast:120ms; --dur:180ms; --dur-slow:280ms;
-  --maxw:760px; --gutter:16px;
-  --font-sans:"Inter",-apple-system,BlinkMacSystemFont,"Segoe UI",Roboto,sans-serif;
-  --font-mono:ui-monospace,"SF Mono","JetBrains Mono","Cascadia Code",monospace;
-}
-@media (prefers-color-scheme: light){
-  :root:not([data-theme="dark"]){
-    color-scheme: light;
-    --bg:#f7f7f9; --surface-1:#fff; --surface-2:#f2f2f5; --surface-3:#ebebf0;
-    --overlay:rgba(20,20,28,.4); --border:#e6e6ec; --border-strong:#d6d6de;
-    --text:#16161c; --text-secondary:#43434f; --text-muted:#8a8a97; --text-inverse:#fff;
-    --accent:#5b5bd6; --accent-hover:#4f4fc9; --accent-active:#4444b8;
-    --accent-soft:rgba(91,91,214,.10); --accent-ring:rgba(91,91,214,.35);
-    --success:#159f6b; --danger:#dc4444; --warning:#c77b0a;
-    --shadow-sm:0 1px 2px rgba(20,20,40,.06);
-    --shadow-md:0 4px 16px rgba(20,20,40,.08),0 1px 2px rgba(20,20,40,.06);
-    --shadow-lg:0 12px 40px rgba(20,20,40,.12);
-  }
-}
-:root[data-theme="light"]{
-  color-scheme: light;
-  --bg:#f7f7f9; --surface-1:#fff; --surface-2:#f2f2f5; --surface-3:#ebebf0;
-  --overlay:rgba(20,20,28,.4); --border:#e6e6ec; --border-strong:#d6d6de;
-  --text:#16161c; --text-secondary:#43434f; --text-muted:#8a8a97; --text-inverse:#fff;
-  --accent:#5b5bd6; --accent-hover:#4f4fc9; --accent-active:#4444b8;
-  --accent-soft:rgba(91,91,214,.10); --accent-ring:rgba(91,91,214,.35);
-  --success:#159f6b; --danger:#dc4444; --warning:#c77b0a;
-  --shadow-sm:0 1px 2px rgba(20,20,40,.06);
-  --shadow-md:0 4px 16px rgba(20,20,40,.08),0 1px 2px rgba(20,20,40,.06);
-  --shadow-lg:0 12px 40px rgba(20,20,40,.12);
-}
-
-*,*::before,*::after{box-sizing:border-box}
-html,body{margin:0;padding:0}
-body{
-  background:var(--bg); color:var(--text-secondary);
-  font:400 14px/1.55 var(--font-sans);
-  -webkit-font-smoothing:antialiased;
-  min-height:100vh;
-}
-.wrap{width:min(100% - 2*var(--gutter), var(--maxw)); margin-inline:auto}
-h1,h2,h3{color:var(--text); margin:0}
-
-/* Topbar */
-.topbar{
-  position:sticky; top:0; z-index:50;
-  background:color-mix(in srgb, var(--bg) 82%, transparent);
-  backdrop-filter:blur(12px); -webkit-backdrop-filter:blur(12px);
-  border-bottom:1px solid var(--border);
-}
-.topbar__in{display:flex; align-items:center; justify-content:space-between; height:56px}
-.brand{display:flex; align-items:center; gap:var(--s-3); font-weight:600; color:var(--text)}
-.brand__mark{
-  width:30px; height:30px; border-radius:var(--r-sm);
-  background:var(--accent-soft); color:var(--accent);
-  display:grid; place-items:center; font-size:16px;
-}
-.brand__sub{color:var(--text-muted); font-weight:400; font-size:13px}
-
-/* Hero */
-.hero{padding:var(--s-12) 0 var(--s-6); text-align:center}
-.hero h1{font-size:40px; line-height:1.12; font-weight:680; letter-spacing:-.02em}
-.hero p{color:var(--text-muted); margin:var(--s-3) 0 0; font-size:15px}
-.urlbar{display:grid; grid-template-columns:1fr auto; gap:var(--s-3); margin-top:var(--s-8)}
-.input{
-  height:54px; width:100%; padding:0 var(--s-5);
-  background:var(--surface-1); color:var(--text);
-  border:1px solid var(--border); border-radius:var(--r-lg);
-  font:400 15px var(--font-sans); outline:none;
-  transition:border-color var(--dur) var(--ease), box-shadow var(--dur) var(--ease);
-}
-.input::placeholder{color:var(--text-muted)}
-.input:focus-visible{border-color:var(--accent); box-shadow:var(--shadow-focus)}
-.input[aria-invalid="true"]{border-color:var(--danger)}
-.hint{color:var(--text-muted); font-size:13px; margin-top:var(--s-3)}
-
-/* Buttons */
-.btn{
-  --h:44px;
-  display:inline-flex; align-items:center; justify-content:center; gap:var(--s-2);
-  height:var(--h); padding:0 var(--s-5);
-  font:550 14px/1 var(--font-sans);
-  border:1px solid transparent; border-radius:var(--r-md);
-  cursor:pointer; white-space:nowrap; user-select:none;
-  transition:background var(--dur-fast) var(--ease), transform var(--dur-fast) var(--ease),
-             box-shadow var(--dur-fast) var(--ease), border-color var(--dur-fast) var(--ease);
-}
-.btn--primary{background:var(--accent); color:var(--text-inverse)}
-.btn--primary:hover{background:var(--accent-hover); transform:translateY(-1px); box-shadow:var(--shadow-md)}
-.btn--primary:active{background:var(--accent-active); transform:translateY(0)}
-.btn--lg{--h:54px; padding:0 var(--s-8); font-size:15px; border-radius:var(--r-lg)}
-.btn--block{width:100%}
-.btn--ghost{background:transparent; color:var(--text-secondary); border-color:var(--border)}
-.btn--ghost:hover{background:var(--surface-2); color:var(--text)}
-.btn--success{background:var(--success-soft); color:var(--success); border-color:transparent}
-.btn--success:hover{background:var(--success); color:var(--text-inverse)}
-.btn:focus-visible{outline:none; box-shadow:var(--shadow-focus)}
-.btn[disabled],.btn[aria-busy="true"]{opacity:.55; pointer-events:none}
-.icon-btn{
-  width:36px; height:36px; padding:0; border-radius:var(--r-sm);
-  background:transparent; border:1px solid transparent; color:var(--text-muted);
-  display:grid; place-items:center; cursor:pointer; font-size:15px;
-  transition:background var(--dur-fast) var(--ease), color var(--dur-fast) var(--ease);
-}
-.icon-btn:hover{background:var(--surface-2); color:var(--text)}
-.icon-btn:focus-visible{outline:none; box-shadow:var(--shadow-focus)}
-.spinner{
-  width:16px; height:16px; border-radius:50%;
-  border:2px solid color-mix(in srgb, currentColor 30%, transparent);
-  border-top-color:currentColor; animation:spin .7s linear infinite;
-}
-@keyframes spin{to{transform:rotate(360deg)}}
-
-/* Cards */
-.card{
-  background:var(--surface-1); border:1px solid var(--border);
-  border-radius:var(--r-lg); padding:var(--s-5); box-shadow:var(--shadow-sm);
-  transition:border-color var(--dur) var(--ease), box-shadow var(--dur) var(--ease);
-}
-.card--enter{animation:card-in var(--dur-slow) var(--ease) both}
-@keyframes card-in{from{opacity:0; transform:translateY(6px)} to{opacity:1; transform:none}}
-.preview{display:grid; grid-template-columns:180px 1fr; gap:var(--s-5)}
-.thumb{
-  position:relative; aspect-ratio:16/9; border-radius:var(--r-md);
-  overflow:hidden; background:var(--surface-2);
-}
-.thumb img{width:100%; height:100%; object-fit:cover; display:block}
-.thumb__badge{
-  position:absolute; right:8px; bottom:8px; padding:2px 6px;
-  border-radius:var(--r-sm); background:var(--overlay); color:#fff;
-  font:500 12px/1 var(--font-mono); backdrop-filter:blur(4px);
-}
-.title{
-  color:var(--text); font:600 16px/1.35 var(--font-sans);
-  display:-webkit-box; -webkit-line-clamp:2; -webkit-box-orient:vertical;
-  overflow:hidden; overflow-wrap:anywhere;
-}
-.meta{color:var(--text-muted); font-size:13px; font-variant-numeric:tabular-nums}
-
-/* Segmented control */
-.seg{
-  display:inline-flex; gap:2px; padding:3px; background:var(--surface-2);
-  border:1px solid var(--border); border-radius:var(--r-md);
-}
-.seg button{
-  appearance:none; border:0; background:transparent; cursor:pointer;
-  color:var(--text-muted); font:500 13px/1 var(--font-sans);
-  padding:8px 14px; border-radius:var(--r-sm);
-  transition:background var(--dur-fast) var(--ease), color var(--dur-fast) var(--ease);
-}
-.seg button:hover{color:var(--text)}
-.seg button[aria-checked="true"]{background:var(--surface-3); color:var(--text); box-shadow:var(--shadow-sm)}
-.seg button:focus-visible{outline:none; box-shadow:var(--shadow-focus)}
-
-.field{display:flex; flex-direction:column; gap:var(--s-2)}
-.field label{font-size:12px; color:var(--text-muted); font-weight:500}
-select.input{height:40px; font-size:14px; border-radius:var(--r-md); padding:0 var(--s-3); cursor:pointer}
-.row{display:flex; gap:var(--s-3); flex-wrap:wrap; align-items:flex-end}
-
-/* Формат-таблица (режим «все форматы») */
-.fmt-list{
-  max-height:300px; overflow-y:auto; border:1px solid var(--border);
-  border-radius:var(--r-md); background:var(--surface-2);
-}
-.fmt{
-  display:grid; grid-template-columns:auto 1fr auto; gap:var(--s-3);
-  align-items:center; padding:10px var(--s-4);
-  border-bottom:1px solid var(--border); cursor:pointer;
-  font-size:13px; transition:background var(--dur-fast) var(--ease);
-}
-.fmt:last-child{border-bottom:0}
-.fmt:hover{background:var(--surface-3)}
-.fmt input{accent-color:var(--accent); cursor:pointer}
-.fmt__main{color:var(--text); font-weight:500}
-.fmt__sub{color:var(--text-muted); font-family:var(--font-mono); font-size:12px}
-.fmt__size{color:var(--text-muted); font-variant-numeric:tabular-nums; font-size:12px}
-.tag{
-  display:inline-block; padding:1px 6px; border-radius:var(--r-xs);
-  font-size:11px; font-weight:500; margin-right:6px;
-}
-.tag--both{background:var(--accent-soft); color:var(--accent)}
-.tag--video{background:var(--warning-soft,rgba(245,165,36,.14)); color:var(--warning)}
-.tag--audio{background:var(--success-soft); color:var(--success)}
-
-/* Progress */
-.progress{
-  position:relative; height:8px; border-radius:var(--r-full);
-  background:var(--surface-3); overflow:hidden; margin:var(--s-3) 0 var(--s-2);
-}
-.progress__fill{
-  position:relative; height:100%; width:var(--value,0%);
-  border-radius:inherit; background:var(--accent);
-  transition:width var(--dur) var(--ease), background var(--dur) var(--ease);
-}
-.progress__fill::after{
-  content:""; position:absolute; inset:0;
-  background:linear-gradient(90deg,transparent,rgba(255,255,255,.22),transparent);
-  transform:translateX(-100%); animation:shimmer 1.4s var(--ease) infinite;
-}
-@keyframes shimmer{to{transform:translateX(100%)}}
-.progress[data-state="finished"] .progress__fill{background:var(--success)}
-.progress[data-state="error"] .progress__fill,
-.progress[data-state="cancelled"] .progress__fill{background:var(--danger)}
-.progress[data-state="finished"] .progress__fill::after,
-.progress[data-state="error"] .progress__fill::after,
-.progress[data-state="cancelled"] .progress__fill::after{animation:none}
-.progress[data-state="indeterminate"] .progress__fill{
-  width:30%; transition:none; animation:indeterminate 1.2s var(--ease) infinite;
-}
-@keyframes indeterminate{0%{transform:translateX(-120%)}100%{transform:translateX(400%)}}
-
-/* Sections */
-.section{margin-top:var(--s-10)}
-.section__head{display:flex; align-items:center; justify-content:space-between; margin-bottom:var(--s-4)}
-.section__head h2{font-size:15px; font-weight:600}
-.pill{
-  background:var(--accent-soft); color:var(--accent);
-  padding:2px 9px; border-radius:var(--r-full); font-size:12px; font-weight:600;
-  margin-left:var(--s-2);
-}
-.stack{display:flex; flex-direction:column; gap:var(--s-3)}
-.task__top{display:flex; align-items:flex-start; justify-content:space-between; gap:var(--s-3)}
-
-/* Empty state */
-.empty{text-align:center; padding:var(--s-10) var(--s-4); color:var(--text-muted)}
-.empty__icon{
-  width:44px; height:44px; border-radius:50%; background:var(--surface-2);
-  display:grid; place-items:center; margin:0 auto var(--s-3); font-size:20px;
-}
-.empty strong{display:block; color:var(--text-secondary); font-weight:600; margin-bottom:4px}
-
-/* History */
-.hist{display:flex; align-items:center; gap:var(--s-3); padding:10px var(--s-3); border-radius:var(--r-sm)}
-.hist:hover{background:var(--surface-2)}
-.hist__name{display:block; color:var(--text-secondary); overflow:hidden; text-overflow:ellipsis; white-space:nowrap}
-.hist__url{
-  display:block; color:var(--text-muted); font-size:12px; font-family:var(--font-mono);
-  overflow:hidden; text-overflow:ellipsis; white-space:nowrap; text-decoration:none;
-}
-.hist__url:hover{color:var(--accent); text-decoration:underline}
-.hist__meta{color:var(--text-muted); font-size:12px; font-variant-numeric:tabular-nums; white-space:nowrap}
-
-/* Banner */
-.banner{
-  display:flex; gap:var(--s-3); align-items:flex-start;
-  background:var(--danger-soft); color:var(--danger);
-  border-radius:var(--r-md); padding:var(--s-3) var(--s-4);
-  font-size:13px; margin-top:var(--s-3);
-}
-.note{
-  background:var(--surface-1); border:1px solid var(--border);
-  border-radius:var(--r-md); padding:var(--s-4);
-  color:var(--text-muted); font-size:13px; display:flex; gap:var(--s-3);
-}
-.note strong{color:var(--text-secondary)}
-
-/* Toasts */
-.toasts{position:fixed; right:20px; bottom:20px; z-index:100; display:flex; flex-direction:column; gap:var(--s-2)}
-.toast{
-  background:var(--surface-2); border:1px solid var(--border);
-  border-left:3px solid var(--accent); border-radius:var(--r-md);
-  box-shadow:var(--shadow-lg); padding:var(--s-3) var(--s-4);
-  color:var(--text); font-size:13px; min-width:240px; max-width:340px;
-  animation:toast-in var(--dur) var(--ease) both;
-}
-.toast--error{border-left-color:var(--danger)}
-.toast--success{border-left-color:var(--success)}
-@keyframes toast-in{from{opacity:0; transform:translateY(8px)} to{opacity:1; transform:none}}
-
-/* Skeleton */
-.skel{background:var(--surface-2); border-radius:var(--r-sm); position:relative; overflow:hidden}
-.skel::after{
-  content:""; position:absolute; inset:0;
-  background:linear-gradient(90deg,transparent,color-mix(in srgb,var(--text) 6%,transparent),transparent);
-  animation:shimmer 1.3s infinite;
-}
-
-footer{margin:var(--s-12) 0 var(--s-8); color:var(--text-muted); font-size:12px; text-align:center}
-footer a{color:var(--text-secondary)}
-
-.hidden{display:none !important}
-.sr{position:absolute; width:1px; height:1px; padding:0; margin:-1px; overflow:hidden; clip:rect(0,0,0,0); white-space:nowrap; border:0}
-
-@media (max-width:640px){
-  .hero{padding:var(--s-8) 0 var(--s-5)}
-  .hero h1{font-size:28px}
-  .urlbar{grid-template-columns:1fr}
-  .preview{grid-template-columns:1fr}
-  .toasts{left:var(--gutter); right:var(--gutter); bottom:calc(var(--s-4) + env(safe-area-inset-bottom))}
-  .toast{max-width:none}
-}
-@media (prefers-reduced-motion: reduce){
-  *{animation-duration:.01ms !important; transition-duration:.01ms !important}
-  .progress__fill::after,.skel::after{animation:none}
-}
-</style>
+<link rel="stylesheet" href="{{ url_for('static', filename='style.css') }}">
 </head>
 <body>
 
@@ -330,7 +18,10 @@ footer a{color:var(--text-secondary)}
       <span class="brand__mark" aria-hidden="true">▼</span>
       <span>yt-grab <span class="brand__sub">· zapret.moe</span></span>
     </div>
-    <button class="icon-btn" id="theme-toggle" aria-label="Сменить тему" title="Сменить тему">◐</button>
+    <nav class="topnav">
+      <a href="/stats">Статистика</a>
+      <button class="icon-btn" id="theme-toggle" aria-label="Сменить тему" title="Сменить тему"><svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" aria-hidden="true"><path d="M21 12.8A9 9 0 1 1 11.2 3a7 7 0 0 0 9.8 9.8z"/></svg></button>
+    </nav>
   </div>
 </header>
 
@@ -388,10 +79,20 @@ footer a{color:var(--text-secondary)}
             <select class="input" id="sel-height"><option value="auto">Авто (лучшее)</option></select>
           </div>
           <div class="field">
-            <label for="sel-container">Контейнер</label>
-            <select class="input" id="sel-container">
-              <option value="mp4">MP4 (H.264)</option>
-              <option value="webm">WebM (VP9)</option>
+            <label for="sel-vcodec">Видео</label>
+            <select class="input" id="sel-vcodec">
+              <option value="auto">Все кодеки</option>
+              <option value="h264">H.264 — совместимость</option>
+              <option value="vp9">VP9</option>
+              <option value="av1">AV1 — лучшее сжатие</option>
+            </select>
+          </div>
+          <div class="field">
+            <label for="sel-vaudio">Аудио</label>
+            <select class="input" id="sel-vaudio">
+              <option value="auto">Все кодеки</option>
+              <option value="aac">AAC</option>
+              <option value="opus">Opus</option>
             </select>
           </div>
         </div>
@@ -401,8 +102,9 @@ footer a{color:var(--text-secondary)}
           <div class="field">
             <label for="sel-acodec">Кодек</label>
             <select class="input" id="sel-acodec">
+              <option value="best">Оригинал — без перекодирования</option>
               <option value="mp3">MP3 — совместимость</option>
-              <option value="aac">AAC (m4a) — качество/размер</option>
+              <option value="aac">AAC — качество/размер</option>
               <option value="opus">Opus — лучшее сжатие</option>
             </select>
           </div>
@@ -451,9 +153,11 @@ footer a{color:var(--text-secondary)}
   <section class="section">
     <div class="note">
       <span aria-hidden="true">🔒</span>
-      <span><strong>Мы ничего не храним.</strong> Настройки и история загрузок лежат только в вашем браузере
-      (localStorage) и никогда не отправляются на сервер. Скачанный файл удаляется с сервера сразу после того,
-      как вы его забрали.</span>
+      <span><strong>Мы не храним вашу историю.</strong> Настройки и список загрузок лежат только в вашем
+      браузере (localStorage) и никогда не отправляются на сервер. Ссылки, которые вы вставляете, и ваш
+      IP нигде не записываются. Скачанный файл удаляется с сервера вскоре после того, как вы его забрали.
+      На сервере ведутся только обезличенные <a href="/stats">счётчики нагрузки</a> — сколько всего
+      запросов и байт, без привязки к людям и ссылкам.</span>
     </div>
   </section>
 
@@ -482,7 +186,8 @@ const store = {
   }
 };
 let settings = Object.assign(
-  { mode: "video", height: "auto", container: "mp4", acodec: "mp3", theme: "dark" },
+  { mode: "video", height: "auto", vcodec: "auto", vaudio: "auto",
+    acodec: "best", theme: "dark" },
   store.get(LS_SETTINGS, {})
 );
 const saveSettings = () => store.set(LS_SETTINGS, settings);
@@ -579,7 +284,8 @@ function renderPreview(d) {
     sel.appendChild(o);
   });
   sel.value = (d.heights || []).includes(settings.height) ? settings.height : "auto";
-  $("#sel-container").value = settings.container;
+  $("#sel-vcodec").value = settings.vcodec;
+  $("#sel-vaudio").value = settings.vaudio;
   $("#sel-acodec").value = settings.acodec;
 
   renderFormats(d.formats || []);
@@ -629,9 +335,10 @@ function setMode(mode) {
 document.querySelectorAll("#mode-seg button").forEach(b =>
   b.addEventListener("click", () => setMode(b.dataset.mode)));
 
-["sel-height","sel-container","sel-acodec"].forEach(id => {
+["sel-height","sel-vcodec","sel-vaudio","sel-acodec"].forEach(id => {
   $("#" + id).addEventListener("change", (e) => {
-    const key = { "sel-height":"height", "sel-container":"container", "sel-acodec":"acodec" }[id];
+    const key = { "sel-height":"height", "sel-vcodec":"vcodec",
+                  "sel-vaudio":"vaudio", "sel-acodec":"acodec" }[id];
     settings[key] = e.target.value; saveSettings();
   });
 });
@@ -647,7 +354,8 @@ $("#download-btn").addEventListener("click", async () => {
   } else if (settings.mode === "audio") {
     body.kind = "audio"; body.acodec = settings.acodec;
   } else {
-    body.kind = "video"; body.height = settings.height; body.container = settings.container;
+    body.kind = "video"; body.height = settings.height;
+    body.vcodec = settings.vcodec; body.vaudio = settings.vaudio;
   }
 
   try {

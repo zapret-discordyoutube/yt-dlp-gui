@@ -4,6 +4,9 @@ from pathlib import Path
 
 BASE_DIR = Path(__file__).resolve().parent
 DOWNLOAD_DIR = Path(os.environ.get("YTG_DOWNLOAD_DIR", BASE_DIR / "downloads"))
+# Каталог для служебных данных (обезличенные счётчики). Вынесен отдельно,
+# потому что systemd монтирует остальной проект только на чтение.
+DATA_DIR = Path(os.environ.get("YTG_DATA_DIR", BASE_DIR / "data"))
 
 # Сеть
 HOST = os.environ.get("YTG_HOST", "127.0.0.1")

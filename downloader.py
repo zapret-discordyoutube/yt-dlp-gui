@@ -1,8 +1,10 @@
 """Ядро: работа с yt-dlp, менеджер фоновых задач, пресеты форматов."""
 from __future__ import annotations
 
+import ipaddress
 import os
 import re
+import socket
 import shutil
 import threading
 import time
@@ -19,62 +21,92 @@ import config
 # Всё строится из фиксированного перечня: kind + height + codec.
 _HEIGHTS = {"2160", "1440", "1080", "720", "480", "360"}
 
-# Аудио-кодеки: ключ -> (yt-dlp preferredcodec, расширение, подпись)
+# Аудио-кодеки для режима «только аудио».
+# 'best' = оставить оригинальную дорожку без перекодирования (без потерь и быстро).
 _ACODECS = {
-    "mp3":  ("mp3",  "mp3", "MP3"),
-    "aac":  ("aac",  "m4a", "AAC (m4a)"),
-    "opus": ("opus", "opus", "Opus"),
+    "best": ("best", "Оригинал"),
+    "mp3":  ("mp3",  "MP3"),
+    "aac":  ("aac",  "AAC"),
+    "opus": ("opus", "Opus"),
 }
-# Видео-контейнеры: ключ -> (merge_output_format, подпись)
-_VCONTAINERS = {
-    "mp4":  ("mp4",  "MP4 (H.264)"),
-    "webm": ("webm", "WebM (VP9)"),
+
+# Видеокодеки: ключ -> (фильтр формата, контейнер для склейки, подпись).
+#
+# Тонкости синтаксиса фильтров yt-dlp:
+#  * фильтры РЕГИСТРОЗАВИСИМЫ, а сайты отдают и 'avc1.640028', и 'AVC1.640028',
+#    поэтому сравниваем регистронезависимым regex;
+#  * '(?i)' в начале выражения падает с PatternError — допустима только
+#    локальная флаг-группа '(?i:...)';
+#  * VP9 приходит и как 'vp9' (HLS), и как 'vp09.xx' (DASH), при этом '^=vp'
+#    зацепил бы ещё и vp8 — отсюда '^vp0?9';
+#  * значение с символами вне [\w.-] обязано быть в кавычках.
+_VCODECS = {
+    "auto": ("",                                      "mp4",  "Все кодеки"),
+    "h264": (r"[vcodec~='(?i:^(avc1|h264))']",        "mp4",  "H.264"),
+    "av1":  (r"[vcodec~='(?i:^av01)']",               "mp4",  "AV1"),
+    "vp9":  (r"[vcodec~='(?i:^vp0?9)']",              "webm", "VP9"),
+}
+
+# Предпочтения по аудиодорожке внутри видео.
+# AAC — это 'mp4a.40.2' (LC) и 'mp4a.40.5' (HE-AAC).
+_VIDEO_AUDIO = {
+    "auto": ("",                              "Все кодеки"),
+    "aac":  (r"[acodec~='(?i:^mp4a)']",        "AAC"),
+    "opus": (r"[acodec~='(?i:^opus)']",        "Opus"),
 }
 
 
-def build_format(kind: str, height: str = "auto",
-                 acodec: str = "mp3", vcontainer: str = "mp4") -> tuple[str, dict, str]:
+def build_format(kind: str, height: str = "auto", acodec: str = "best",
+                 vcodec: str = "auto", vaudio: str = "auto") -> tuple[str, dict, str]:
     """Возвращает (format_selector, extra_opts, label) по безопасному выбору.
 
-    kind='audio': acodec in {mp3,aac,opus}
-    kind='video': height in {auto,2160,...,360}, vcontainer in {mp4,webm}
+    kind='audio': acodec in {best,mp3,aac,opus}
+    kind='video': height in {auto,2160..360}, vcodec in {auto,h264,av1,vp9},
+                  vaudio in {auto,aac,opus}
     """
     if kind == "audio":
         if acodec not in _ACODECS:
             raise ValueError("unknown_acodec")
-        pref, _ext, label = _ACODECS[acodec]
-        return "bestaudio/best", {
-            "postprocessors": [{
-                "key": "FFmpegExtractAudio",
-                "preferredcodec": pref,
-                "preferredquality": "192",
-            }],
-        }, label
+        pref, label = _ACODECS[acodec]
+        pp = {"key": "FFmpegExtractAudio", "preferredcodec": pref}
+        if pref != "best":
+            pp["preferredquality"] = "192"
+        return "bestaudio/best", {"postprocessors": [pp]}, label
 
     if kind == "video":
-        if vcontainer not in _VCONTAINERS:
-            raise ValueError("unknown_container")
-        merge, cname = _VCONTAINERS[vcontainer]
-        if vcontainer == "mp4":
-            vsel = "bestvideo[ext=mp4]/bestvideo[vcodec^=avc1]/bestvideo"
-            asel = "bestaudio[ext=m4a]/bestaudio"
-        else:
-            vsel = "bestvideo[ext=webm]/bestvideo[vcodec^=vp9]/bestvideo"
-            asel = "bestaudio[ext=webm]/bestaudio"
+        if vcodec not in _VCODECS:
+            raise ValueError("unknown_vcodec")
+        if vaudio not in _VIDEO_AUDIO:
+            raise ValueError("unknown_vaudio")
+        vfilter, container, vlabel = _VCODECS[vcodec]
+        afilter, alabel = _VIDEO_AUDIO[vaudio]
+
         if height == "auto":
-            sel = f"{vsel}+{asel}/best"
-            hlabel = "Авто"
+            hfilter, hlabel = "", "Авто"
         elif height in _HEIGHTS:
-            hpart = f"[height<={height}]"
-            sel = (f"bestvideo{hpart}+bestaudio/"
-                   f"best{hpart}/best")
-            hlabel = f"{height}p"
+            # '?' после оператора обязателен: иначе форматы, у которых height
+            # неизвестен (None), молча выбрасываются из выборки.
+            hfilter, hlabel = f"[height<=?{height}]", f"{height}p"
         else:
             raise ValueError("unknown_height")
-        return sel, {"merge_output_format": merge}, f"{hlabel} · {cname}"
+
+        v = f"bestvideo{hfilter}{vfilter}"
+        # Каскад запасных вариантов: сначала точный кодек и звук, затем
+        # послабления, чтобы выбор редкого сочетания не приводил к отказу.
+        sel = "/".join(filter(None, [
+            f"{v}+bestaudio{afilter}" if afilter else None,
+            f"{v}+bestaudio",
+            f"best{hfilter}{vfilter}" if vfilter else None,
+            f"best{hfilter}",
+            "best",
+        ]))
+        label = " · ".join([hlabel, vlabel] + ([alabel] if vaudio != "auto" else []))
+        return sel, {"merge_output_format": container}, label
 
     raise ValueError("unknown_kind")
 
+
+_MERGE_CONTAINERS = {"mp4", "webm", "mkv", "mov"}
 
 # Разрешаем произвольный выбор формата, но только как ID (и связку через '+').
 # Запрещены скобки, фильтры, '/', пробелы — то есть синтаксис селекторов yt-dlp.
@@ -88,11 +120,36 @@ def build_from_format_id(format_id: str, container: str = "auto") -> tuple[str, 
         raise ValueError("bad_format_id")
     extra: dict = {}
     if "+" in fid:
-        # связка video+audio всегда требует merge
-        extra["merge_output_format"] = "mp4" if container == "auto" else container
-    elif container in _VCONTAINERS:
-        extra["merge_output_format"] = _VCONTAINERS[container][0]
-    return fid, extra, f"format {fid}"
+        # Связка video+audio всегда требует склейки. mkv принимает любое
+        # сочетание кодеков, поэтому он — безопасный выбор по умолчанию,
+        # когда пользователь смешал произвольные дорожки.
+        extra["merge_output_format"] = (
+            container if container in _MERGE_CONTAINERS else "mkv")
+    return fid, extra, f"формат {fid}"
+
+
+def _is_public_host(host: str) -> bool:
+    """Резолвим имя и требуем, чтобы ВСЕ адреса были публичными.
+
+    Без этого генерик-экстрактор yt-dlp сходит по любому http(s)-адресу:
+    на метаданные облака (169.254.169.254), на localhost и во внутреннюю
+    сеть хоста. Для публичного сервиса это SSRF.
+    """
+    try:
+        infos = socket.getaddrinfo(host, None)
+    except socket.gaierror:
+        return False
+    if not infos:
+        return False
+    for info in infos:
+        try:
+            ip = ipaddress.ip_address(info[4][0])
+        except ValueError:
+            return False
+        if (ip.is_private or ip.is_loopback or ip.is_link_local
+                or ip.is_reserved or ip.is_multicast or ip.is_unspecified):
+            return False
+    return True
 
 
 def validate_url(url: str) -> str:
@@ -102,6 +159,11 @@ def validate_url(url: str) -> str:
     p = urlparse(url)
     if p.scheme not in ("http", "https") or not p.netloc:
         raise ValueError("bad_scheme")
+    host = p.hostname
+    if not host:
+        raise ValueError("bad_scheme")
+    if not _is_public_host(host):
+        raise ValueError("private_host")
     return url
 
 
@@ -216,6 +278,9 @@ class Task:
 class DownloadManager:
     def __init__(self) -> None:
         self.tasks: dict[str, Task] = {}
+        # Вызывается при завершении задачи (любым исходом). Нужен для
+        # обезличенных счётчиков; сам менеджер о статистике ничего не знает.
+        self.on_complete = None
         self.lock = threading.Lock()
         self.sema = threading.Semaphore(config.MAX_CONCURRENT_DOWNLOADS)
         config.DOWNLOAD_DIR.mkdir(parents=True, exist_ok=True)
@@ -397,6 +462,11 @@ class DownloadManager:
             task.error = _clean_err(str(e))
         finally:
             self.sema.release()
+            if self.on_complete:
+                try:
+                    self.on_complete(task)
+                except Exception:      # статистика не должна ломать загрузку
+                    pass
 
     def _cleanup_partials(self, task: Task) -> None:
         # только файлы этой задачи: имена начинаются с её id
