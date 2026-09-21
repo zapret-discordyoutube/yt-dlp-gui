@@ -171,6 +171,13 @@ _FORMAT_KEYWORDS = {
 }
 
 
+def is_youtube(url: str) -> bool:
+    """YouTube отдаёт HLS, а download_ranges с HLS зависает — обрезку там
+    отключаем. Проверяем хост, а не подстроку, чтобы не ловить чужие домены."""
+    host = (urlparse(url).hostname or "").lower().removeprefix("www.")
+    return host in _YT_HOSTS or host.endswith(".youtube.com") or host == "youtu.be"
+
+
 def parse_timecode(s: str) -> float | None:
     """'90' | '1:30' | '1:02:03' | '1:30.5' -> секунды. Пусто/мусор -> None."""
     s = (s or "").strip()

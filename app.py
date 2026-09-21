@@ -280,6 +280,8 @@ def api_download():
         except ValueError:
             return err("Неверный отрезок: конец должен быть больше начала")
         if clip:
+            if dl.is_youtube(url):
+                return err("Обрезка для YouTube пока недоступна — скачайте ролик целиком")
             extra = {**extra, **clip}
             label = f"{label} · ✂ {clip_label}"
 
