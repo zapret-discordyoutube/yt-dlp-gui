@@ -810,6 +810,10 @@ class DownloadManager:
         # начинает счёт заново для второй дорожки, и проверка «по текущему
         # файлу» пропускала суммарно до двух потолков на диск.
         per_file: dict[str, int] = {}
+        # Сглаженная скорость (EMA): у YouTube отдача рваная — мгновенная
+        # скорость скачет от сотен КБ/с до десятков МБ/с, и таймер «осталось»
+        # прыгал от секунд до минут. Показываем усреднённую.
+        ema_speed = [None]
 
         def hook(d):
             if task.cancel.is_set():
@@ -847,10 +851,20 @@ class DownloadManager:
                 task.status = "downloading"
                 total = d.get("total_bytes") or d.get("total_bytes_estimate")
                 task.total_bytes = total
+                done = d.get("downloaded_bytes", 0)
                 if total:
-                    task.percent = round(d.get("downloaded_bytes", 0) / total * 100, 1)
-                task.speed = d.get("speed")
-                task.eta = d.get("eta")
+                    task.percent = round(done / total * 100, 1)
+                # EMA скорости: сильное сглаживание, чтобы таймер не прыгал.
+                sp = d.get("speed")
+                if sp and sp > 0:
+                    ema_speed[0] = (sp if ema_speed[0] is None
+                                    else ema_speed[0] * 0.8 + sp * 0.2)
+                task.speed = ema_speed[0] or sp
+                # «Осталось» считаем от сглаженной скорости, а не мгновенной.
+                if task.speed and total and total > done:
+                    task.eta = int((total - done) / task.speed)
+                else:
+                    task.eta = d.get("eta")
             elif st == "finished":
                 # скачивание завершено, дальше возможен постпроцессинг (merge/mp3)
                 task.percent = 100

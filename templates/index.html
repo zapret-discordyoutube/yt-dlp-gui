@@ -157,7 +157,9 @@
           <label class="chk"><input type="checkbox" id="pp-no_merge"><span>Не объединять аудио/видео</span></label>
         </div>
 
-        <button class="btn btn--primary btn--block" id="download-btn" style="margin-top:var(--s-5)">
+        <div class="size-est hidden" id="size-est"></div>
+
+        <button class="btn btn--primary btn--block" id="download-btn" style="margin-top:var(--s-3)">
           ⭳ Скачать
         </button>
       </div>
@@ -402,6 +404,7 @@ function renderPreview(d) {
   ["mode-seg", "opts-video", "opts-audio", "opts-all", "pp-opts"].forEach(id =>
     $("#" + id).classList.toggle("hidden", gallery));
   if (!gallery) setMode(settings.mode);
+  else updateSizeEst();
   $("#download-btn").textContent =
     gallery ? "⭳ Скачать фото" : (d.is_live ? "● Записать эфир" : "⭳ Скачать");
 
@@ -437,6 +440,40 @@ function renderFormats(formats) {
   });
 }
 
+/* Примерный размер выбранного варианта — оценка из данных probe (filesize
+   или битрейт × длительность). Не точная, но даёт понять порядок. */
+function updateSizeEst() {
+  const el = $("#size-est");
+  const fs = current && current.formats;
+  if (!fs || !fs.length || current.is_gallery) { el.classList.add("hidden"); return; }
+  const dur = current.duration || 0;
+  const bytesOf = f => f.filesize || (f.tbr ? Math.round(f.tbr * 125 * dur) : 0);
+  const bestAudio = () => fs.filter(f => f.kind === "audio")
+    .sort((x, y) => (y.abr || y.tbr || 0) - (x.abr || x.tbr || 0))[0];
+  let total = 0;
+  if (settings.mode === "audio") {
+    const a = bestAudio(); total = a ? bytesOf(a) : 0;
+  } else if (settings.mode === "all") {
+    const picked = document.querySelector('input[name="fmt"]:checked');
+    const f = picked && fs.find(x => x.format_id === picked.value);
+    total = f ? bytesOf(f) : 0;
+  } else {
+    const h = settings.height === "auto" ? Infinity : parseInt(settings.height);
+    const v = fs.filter(f => (f.kind === "video" || f.kind === "both") && (f.height || 0) <= h)
+      .sort((a, b) => ((b.height || 0) - (a.height || 0)) || ((b.tbr || 0) - (a.tbr || 0)))[0];
+    if (v) {
+      total = bytesOf(v);
+      if (v.kind === "video") { const a = bestAudio(); if (a) total += bytesOf(a); }
+    }
+  }
+  if (total > 0) {
+    el.textContent = "Примерный размер: ~" + fmtBytes(total);
+    el.classList.remove("hidden");
+  } else {
+    el.classList.add("hidden");
+  }
+}
+
 /* ---------- Переключение режима ---------- */
 function setMode(mode) {
   settings.mode = mode; saveSettings();
@@ -445,6 +482,7 @@ function setMode(mode) {
   $("#opts-video").classList.toggle("hidden", mode !== "video");
   $("#opts-audio").classList.toggle("hidden", mode !== "audio");
   $("#opts-all").classList.toggle("hidden", mode !== "all");
+  updateSizeEst();
 }
 document.querySelectorAll("#mode-seg button").forEach(b =>
   b.addEventListener("click", () => setMode(b.dataset.mode)));
@@ -453,9 +491,11 @@ document.querySelectorAll("#mode-seg button").forEach(b =>
   $("#" + id).addEventListener("change", (e) => {
     const key = { "sel-height":"height", "sel-vcodec":"vcodec",
                   "sel-vaudio":"vaudio", "sel-acodec":"acodec" }[id];
-    settings[key] = e.target.value; saveSettings();
+    settings[key] = e.target.value; saveSettings(); updateSizeEst();
   });
 });
+/* Выбор конкретного формата во «Все форматы» тоже меняет оценку. */
+$("#fmt-list").addEventListener("change", updateSizeEst);
 
 /* Чекбоксы постобработки: восстановление и сохранение выбора. */
 PP_KEYS.forEach(k => {
