@@ -277,16 +277,25 @@ def api_progress(tid):
         # иначе несколько зависших соединений исчерпают пул gunicorn.
         # Браузер переподключит EventSource автоматически.
         deadline = time.time() + config.SSE_MAX_SECONDS
+        last_write = time.time()
         while time.time() < deadline:
             t = manager.get(tid)
             if not t:
                 yield f"data: {json.dumps({'status': 'gone'})}\n\n"
                 return
             payload = json.dumps(t.public(), ensure_ascii=False)
+            now = time.time()
             if payload != last:
                 yield f"data: {payload}\n\n"
-                last = payload
-            if t.status in ("finished", "error", "cancelled"):
+                last, last_write = payload, now
+            elif now - last_write > 15:
+                # Пока статус не меняется (очередь, долгая склейка), в сокет
+                # не шло ни байта, и обрыв клиента оставался незамеченным:
+                # поток жил до самого дедлайна. Периодический комментарий
+                # заставляет запись упасть на закрытом соединении.
+                yield ": ping\n\n"
+                last_write = now
+            if t.status in ("finished", "error", "cancelled", "served"):
                 return
             time.sleep(0.5)
         # мягкий разрыв: клиент переподключится и продолжит следить
@@ -314,14 +323,16 @@ def api_file(tid):
     # Отмечаем момент выдачи; уборщик удалит файл через grace-период.
     # Не используем resp.call_on_close: send_file включает direct_passthrough,
     # и WSGI закрывает файловую обёртку, а не Response — колбэк не сработает.
-    resp = send_file(path, as_attachment=True,
-                     download_name=t.display_name or t.filename)
-    if t.served_at is None:
+    try:
+        resp = send_file(path, as_attachment=True,
+                         download_name=t.display_name or t.filename)
+    except (FileNotFoundError, OSError):
+        # Уборщик успел удалить файл между проверкой и открытием.
+        return err("Файл удалён с сервера — запустите загрузку заново", 410)
+    if manager.mark_served(t):
         # считаем только первую выдачу, чтобы докачка не удваивала цифры
         stats.bump("files_served")
         stats.bump("bytes_served", t.filesize or 0)
-    if config.DELETE_AFTER_SERVE and t.served_at is None:
-        t.served_at = time.time()
     return resp
 
 

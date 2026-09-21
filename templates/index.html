@@ -1,5 +1,7 @@
 <!DOCTYPE html>
-<html lang="ru" data-theme="dark">
+<!-- data-theme НЕ задан: иначе правило prefers-color-scheme
+     никогда не срабатывало и системная светлая тема игнорировалась -->
+<html lang="ru">
 <head>
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
@@ -11,6 +13,7 @@
       href="{{ url_for('static', filename='fonts/inter-400-cyrillic.woff2') }}">
 <link rel="preload" as="font" type="font/woff2" crossorigin
       href="{{ url_for('static', filename='fonts/inter-600-cyrillic.woff2') }}">
+<link rel="icon" type="image/svg+xml" href="{{ url_for('static', filename='favicon.svg') }}">
 <link rel="stylesheet" href="{{ url_for('static', filename='style.css') }}">
 </head>
 <body>
@@ -190,8 +193,18 @@ const LS_HISTORY  = "ytgrab.history.v1";
 /* ---------- localStorage: настройки и история живут только здесь ---------- */
 const store = {
   get(key, fallback) {
-    try { const v = localStorage.getItem(key); return v ? JSON.parse(v) : fallback; }
-    catch { return fallback; }
+    try {
+      const v = localStorage.getItem(key);
+      if (!v) return fallback;
+      const parsed = JSON.parse(v);
+      // Битый JSON ловился и раньше, а вот валидный, но не того типа —
+      // нет: старый формат истории приводил к hist.unshift is not a
+      // function при каждой будущей загрузке, и починить это можно было
+      // только кнопкой «Очистить».
+      if (Array.isArray(fallback) !== Array.isArray(parsed)) return fallback;
+      if (parsed === null || typeof parsed !== typeof fallback) return fallback;
+      return parsed;
+    } catch { return fallback; }
   },
   set(key, value) {
     try { localStorage.setItem(key, JSON.stringify(value)); } catch { /* приватный режим */ }
@@ -199,19 +212,25 @@ const store = {
 };
 let settings = Object.assign(
   { mode: "video", height: "auto", vcodec: "auto", vaudio: "auto",
-    acodec: "best", theme: "dark" },
+    acodec: "best", theme: null },
   store.get(LS_SETTINGS, {})
 );
 const saveSettings = () => store.set(LS_SETTINGS, settings);
 
 /* ---------- Тема ---------- */
+const systemTheme = () =>
+  window.matchMedia("(prefers-color-scheme: light)").matches ? "light" : "dark";
+const currentTheme = () =>
+  document.documentElement.getAttribute("data-theme") || systemTheme();
+
 function applyTheme(t) {
   document.documentElement.setAttribute("data-theme", t);
   settings.theme = t; saveSettings();
 }
-applyTheme(settings.theme || "dark");
+// Пока пользователь не выбрал тему сам, решает система.
+if (settings.theme) applyTheme(settings.theme);
 $("#theme-toggle").addEventListener("click", () => {
-  applyTheme(document.documentElement.getAttribute("data-theme") === "dark" ? "light" : "dark");
+  applyTheme(currentTheme() === "dark" ? "light" : "dark");
 });
 
 /* ---------- Утилиты ---------- */
@@ -230,6 +249,15 @@ const fmtDur = (s) => {
 };
 const esc = (s) => String(s ?? "").replace(/[&<>"']/g, c =>
   ({ "&":"&amp;","<":"&lt;",">":"&gt;",'"':"&quot;","'":"&#39;" }[c]));
+
+/* Ссылки из истории попадают в href. История лежит в localStorage и могла
+   быть испорчена, поэтому пропускаем только http(s) — как и на /stats. */
+const safeUrl = (u) => {
+  try {
+    const p = new URL(u);
+    return (p.protocol === "http:" || p.protocol === "https:") ? u : null;
+  } catch { return null; }
+};
 
 function toast(msg, kind = "") {
   const el = document.createElement("div");
@@ -358,6 +386,14 @@ document.querySelectorAll("#mode-seg button").forEach(b =>
 /* ---------- Запуск загрузки ---------- */
 $("#download-btn").addEventListener("click", async () => {
   if (!current) return;
+  const btn = $("#download-btn");
+  if (btn.dataset.busy === "1") return;   // защита от повторных кликов
+  btn.dataset.busy = "1";
+  btn.setAttribute("aria-busy", "true");
+  const restore = () => {
+    delete btn.dataset.busy;
+    btn.removeAttribute("aria-busy");
+  };
   const body = { url: current.webpage_url, title: current.title, thumbnail: current.thumbnail };
   if (settings.mode === "all") {
     const picked = document.querySelector('input[name="fmt"]:checked');
@@ -380,7 +416,11 @@ $("#download-btn").addEventListener("click", async () => {
     addTask(task);
     watchTask(task.id);
     toast("Загрузка началась");
-  } catch (e) { toast(e.message, "error"); }
+  } catch (e) {
+    toast(e.message, "error");
+  } finally {
+    restore();
+  }
 });
 
 /* ---------- Карточки задач + SSE ---------- */
@@ -413,6 +453,7 @@ function addTask(t) {
 function watchTask(id) {
   const es = new EventSource(`/api/tasks/${id}/progress`);
   es.onmessage = (ev) => {
+    retries = 0;          // поток снова живой — счётчик неудач обнуляем
     let t; try { t = JSON.parse(ev.data); } catch { return; }
     if (t.status === "gone") { es.close(); return; }
     renderTask(t);
@@ -428,6 +469,10 @@ function watchTask(id) {
   // но не бесконечно: если задача пропала, честно об этом говорим.
   let retries = 0;
   es.onerror = () => {
+    // Сервер штатно рвёт поток каждые SSE_MAX_SECONDS, и браузер
+    // переподключается сам — это не ошибка. Сдаёмся, только если
+    // соединение закрыто окончательно и попытки подряд не помогли.
+    if (es.readyState !== EventSource.CLOSED) return;
     if (++retries > 5) {
       es.close();
       const el = document.getElementById("task-" + id);
@@ -470,13 +515,23 @@ function renderTask(t) {
       a.className = "btn btn--success btn--block";
       a.style.marginTop = "var(--s-3)";
       a.href = `/api/tasks/${t.id}/file`;
+      // В отдельную вкладку: иначе при уже удалённом файле браузер уводил
+      // со страницы на голый JSON с ошибкой, теряя все карточки и все
+      //活ные подписки на прогресс других загрузок.
+      a.target = "_blank";
+      a.rel = "noopener";
       a.textContent = "⭳ Сохранить файл";
       el.appendChild(a);
     }
   } else if (t.status === "error") {
     bar.dataset.state = "error";
     fill.style.setProperty("--value", "100%");
+    bar.removeAttribute("aria-valuenow");   // иначе скринридер читает старый процент
     status.textContent = "Ошибка: " + (t.error || "неизвестно");
+  } else if (t.status === "served") {
+    bar.dataset.state = "finished";
+    status.textContent = "Файл уже забран и удалён с сервера";
+    el.querySelector(".btn--success")?.remove();
   } else if (t.status === "cancelled") {
     bar.dataset.state = "cancelled";
     fill.style.setProperty("--value", "100%");
@@ -516,11 +571,11 @@ function renderHistory() {
       <span aria-hidden="true">🎬</span>
       <span style="min-width:0; flex:1">
         <span class="hist__name" title="${esc(h.title)}">${esc(h.title)}</span>
-        ${h.url ? `<a class="hist__url" href="${esc(h.url)}" target="_blank"
+        ${safeUrl(h.url) ? `<a class="hist__url" href="${esc(h.url)}" target="_blank"
            rel="noopener noreferrer" title="${esc(h.url)}">${esc(h.url)}</a>` : ""}
       </span>
       <span class="hist__meta">${esc(h.label || "")} · ${fmtBytes(h.filesize)}${when ? " · " + when : ""}</span>
-      ${h.url ? `<button class="icon-btn" data-again="${esc(h.url)}"
+      ${safeUrl(h.url) ? `<button class="icon-btn" data-again="${esc(h.url)}"
          aria-label="Скачать снова" title="Скачать снова">↻</button>` : ""}`;
     box.appendChild(d);
   });

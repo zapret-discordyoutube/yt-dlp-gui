@@ -8,6 +8,7 @@
 """
 from __future__ import annotations
 
+import contextlib
 import sqlite3
 import threading
 from datetime import date, datetime, timedelta, timezone
@@ -44,15 +45,29 @@ CREATE INDEX IF NOT EXISTS feed_count ON feed(count DESC);
 """
 
 
-def _connect() -> sqlite3.Connection:
+@contextlib.contextmanager
+def _connect():
+    """Соединение с гарантированным закрытием.
+
+    sqlite3.Connection.__exit__ фиксирует транзакцию, но НЕ закрывает
+    соединение: дескрипторы держались до сборки мусора и при нагрузке
+    упирались в лимит открытых файлов процесса.
+    """
     conn = sqlite3.connect(_DB_PATH, timeout=10)
-    conn.execute("PRAGMA journal_mode=WAL")
-    return conn
+    try:
+        conn.execute("PRAGMA busy_timeout=5000")
+        with conn:
+            yield conn
+    finally:
+        conn.close()
 
 
 def init() -> None:
     config.DATA_DIR.mkdir(parents=True, exist_ok=True)
     with _lock, _connect() as conn:
+        # WAL — персистентное свойство файла, задавать его на каждом
+        # соединении не нужно.
+        conn.execute("PRAGMA journal_mode=WAL")
         conn.executescript(_SCHEMA)
 
 

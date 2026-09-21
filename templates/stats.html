@@ -1,5 +1,7 @@
 <!DOCTYPE html>
-<html lang="ru" data-theme="dark">
+<!-- data-theme НЕ задан: иначе правило prefers-color-scheme
+     никогда не срабатывало и системная светлая тема игнорировалась -->
+<html lang="ru">
 <head>
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
@@ -12,6 +14,7 @@
       href="{{ url_for('static', filename='fonts/inter-400-cyrillic.woff2') }}">
 <link rel="preload" as="font" type="font/woff2" crossorigin
       href="{{ url_for('static', filename='fonts/inter-600-cyrillic.woff2') }}">
+<link rel="icon" type="image/svg+xml" href="{{ url_for('static', filename='favicon.svg') }}">
 <link rel="stylesheet" href="{{ url_for('static', filename='style.css') }}">
 </head>
 <body>
@@ -148,7 +151,9 @@ try {
   if (s.theme) document.documentElement.setAttribute("data-theme", s.theme);
 } catch { /* приватный режим */ }
 $("#theme-toggle").addEventListener("click", () => {
-  const next = document.documentElement.getAttribute("data-theme") === "dark" ? "light" : "dark";
+  const cur = document.documentElement.getAttribute("data-theme")
+    || (window.matchMedia("(prefers-color-scheme: light)").matches ? "light" : "dark");
+  const next = cur === "dark" ? "light" : "dark";
   document.documentElement.setAttribute("data-theme", next);
   try {
     const s = JSON.parse(localStorage.getItem("ytgrab.settings.v1") || "{}");
@@ -325,7 +330,7 @@ function youtubeId(url) {
     const u = new URL(url);
     const h = u.hostname.replace(/^www\./, "");
     if (h === "youtu.be") return u.pathname.slice(1).split("/")[0] || null;
-    if (h.endsWith("youtube.com")) {
+    if (h === "youtube.com" || h.endsWith(".youtube.com")) {
       if (u.pathname === "/watch") return u.searchParams.get("v");
       const m = u.pathname.match(/^\/(shorts|embed|live)\/([^/]+)/);
       if (m) return m[2];
@@ -350,6 +355,7 @@ async function fetchTitle(url) {
   }
 }
 
+const FEED_PAGE = 50;
 let feedOrder = "recent", feedOffset = 0;
 
 const relTime = (iso) => {
@@ -361,7 +367,21 @@ const relTime = (iso) => {
   return d.toLocaleDateString("ru-RU", { day: "numeric", month: "short", year: "numeric" });
 };
 
+let feedLoading = false;
+
 async function loadFeed(reset) {
+  // Без этого два быстрых клика по «Показать ещё» уходили с одинаковым
+  // смещением: страница дублировалась, а следующая пропускалась навсегда.
+  if (feedLoading) return;
+  feedLoading = true;
+  try {
+    await _loadFeed(reset);
+  } finally {
+    feedLoading = false;
+  }
+}
+
+async function _loadFeed(reset) {
   if (reset) { feedOffset = 0; $("#feed").innerHTML = ""; }
   let d;
   try {
@@ -418,7 +438,7 @@ function applyFeed(d) {
            rel="noopener noreferrer nofollow">${esc(url)}</a>
         <div class="meta">${esc(host)} · ${esc(relTime(it.last_seen))}</div>
       </div>
-      <div class="feed-count" title="Скачивали ${it.count} раз(а)">
+      <div class="feed-count" title="Скачивали ${esc(it.count)} раз(а)">
         <strong>${fmtNum(it.count)}</strong><span>раз</span>
       </div>`;
     $("#feed").appendChild(el);
@@ -431,7 +451,7 @@ function applyFeed(d) {
   });
 
   feedOffset += items.length;
-  $("#feed-more").classList.toggle("hidden", items.length < 50);
+  $("#feed-more").classList.toggle("hidden", items.length < FEED_PAGE);
 }
 
 document.querySelectorAll("#feed-seg button").forEach(b =>
@@ -451,16 +471,16 @@ cache.write({ stats: DATA, feed: INITIAL.feed });
 if (INITIAL.feed) applyFeed(INITIAL.feed);
 
 /* Обновляем только когда вкладка на виду и кэш протух. */
-setInterval(() => {
-  if (document.visibilityState === "visible" && !cache.fresh()) {
-    load(); loadFeed(true);
-  }
-}, 30000);
-document.addEventListener("visibilitychange", () => {
-  if (document.visibilityState === "visible" && !cache.fresh()) {
-    load(); loadFeed(true);
-  }
-});
+function refreshIfStale() {
+  if (document.visibilityState !== "visible" || cache.fresh()) return;
+  load();
+  // Ленту перечитываем только если пользователь не листал дальше первой
+  // страницы: иначе фоновое обновление схлопывало подгруженные карточки
+  // и сбрасывало прокрутку прямо во время чтения.
+  if (feedOffset <= FEED_PAGE) loadFeed(true);
+}
+setInterval(refreshIfStale, 30000);
+document.addEventListener("visibilitychange", refreshIfStale);
 </script>
 </body>
 </html>

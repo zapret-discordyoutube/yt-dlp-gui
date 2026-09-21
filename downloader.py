@@ -445,8 +445,17 @@ class DownloadManager:
                 t.filename = None
 
         # 2) страховочное удаление файлов, которые так и не забрали
+        # Файлы задач, которые прямо сейчас качаются, трогать нельзя:
+        # загрузка длиннее FILE_TTL теряла из-под yt-dlp уже скачанную
+        # дорожку и падала после часов работы.
+        with self.lock:
+            live = {t.id for t in self.tasks.values()
+                    if t.status in ("queued", "downloading", "processing")}
+
         cutoff = now - config.FILE_TTL_MINUTES * 60
         for p in config.DOWNLOAD_DIR.iterdir():
+            if any(p.name.startswith(tid) for tid in live):
+                continue
             # .gitkeep исключён и при подметании на старте: без этого
             # маркер каталога удалялся по TTL, и каталог переставал
             # восстанавливаться из репозитория.
@@ -459,10 +468,18 @@ class DownloadManager:
         # снять старые карточки задач (только в памяти)
         tcut = now - config.TASK_TTL_MINUTES * 60
         with self.lock:
-            for tid in [t.id for t in self.tasks.values()
-                        if t.created_at < tcut
-                        and t.status in ("finished", "error", "cancelled", "served")]:
-                self.tasks.pop(tid, None)
+            for t in list(self.tasks.values()):
+                if t.created_at >= tcut:
+                    continue
+                if t.status in ("finished", "error", "cancelled", "served"):
+                    self.tasks.pop(t.id, None)
+                elif t.created_at < now - config.TASK_TTL_MINUTES * 120:
+                    # Зависшая задача (умер воркер, встал постпроцессинг)
+                    # раньше не выселялась НИКОГДА: карточки копились до
+                    # TASKS_MAX, и сервис отвечал вечным «перегружен».
+                    t.error = "Задача не завершилась и была снята"
+                    t.status = "error"
+                    logging.warning("снята зависшая задача в статусе %s", t.status)
 
     def _start_janitor(self) -> None:
         def loop():
@@ -514,13 +531,40 @@ class DownloadManager:
 
     def _worker(self) -> None:
         while True:
-            task = self.queue.get()
+            try:
+                task = self.queue.get()
+            except BaseException:                  # noqa: BLE001
+                logging.exception("воркер не смог взять задачу")
+                time.sleep(1)
+                continue
             try:
                 self._run(task)
-            except Exception:                      # воркер обязан пережить всё
+            except BaseException:                  # noqa: BLE001
+                # Именно BaseException: при Exception поток воркера умирал
+                # молча, пул усыхал до нуля, и сервис отвечал вечным
+                # «Сервис перегружен» до перезапуска.
                 logging.exception("сбой воркера загрузки")
+                try:
+                    task.status, task.error = "error", "Внутренняя ошибка"
+                    if self.on_complete:
+                        self.on_complete(task)
+                except BaseException:              # noqa: BLE001
+                    pass
             finally:
                 self.queue.task_done()
+
+    def mark_served(self, task: "Task") -> bool:
+        """Отметить первую выдачу файла. True — если это именно первая.
+
+        Проверка и установка обязаны быть атомарны: браузеры и менеджеры
+        загрузок шлют параллельные Range-запросы, и раздельные проверка с
+        присваиванием кратно завышали публичную статистику.
+        """
+        with self.lock:
+            if task.served_at is not None:
+                return False
+            task.served_at = time.time()
+            return True
 
     def pending(self) -> int:
         return self.queue.qsize()
@@ -652,6 +696,13 @@ class DownloadManager:
                 task.status = "cancelled"
                 self._cleanup_partials(task)
                 return
+            if task.cancel.is_set():
+                # Отмена могла прийти уже после последнего хука. Публиковать
+                # такую загрузку в ленту и засчитывать её нельзя: пользователь
+                # нажал «Отмена» и получил подтверждение.
+                task.status = "cancelled"
+                self._cleanup_partials(task)
+                return
             if final and os.path.exists(final):
                 task.filename = os.path.basename(final)          # <id>.<ext>
                 ext = os.path.splitext(final)[1]
@@ -669,14 +720,16 @@ class DownloadManager:
             self._cleanup_partials(task)
         except yt_dlp.utils.DownloadError as e:
             # осмысленное сообщение самого yt-dlp — показываем очищенным
-            task.status = "error"
+            # Текст ПЕРЕД статусом: клиент закрывает поток по терминальному
+            # статусу и успевал прочитать «Ошибка: » без причины.
             task.error = _clean_err(str(e))
+            task.status = "error"
             logging.warning("загрузка не удалась (%s): %s",
                             _host_of(task.url), type(e).__name__)
         except Exception:
             # что угодно иное — внутренняя ошибка; наружу её текст не отдаём
-            task.status = "error"
             task.error = "Внутренняя ошибка, попробуйте другой формат"
+            task.status = "error"
             logging.exception("внутренний сбой задачи (%s)", _host_of(task.url))
         finally:
             if self.on_complete:

@@ -320,6 +320,13 @@ select.input{height:40px; font-size:14px; border-radius:var(--r-md); padding:0 v
 }
 .hist__url:hover{color:var(--accent); text-decoration:underline}
 .hist__meta{color:var(--text-muted); font-size:12px; font-variant-numeric:tabular-nums; white-space:nowrap}
+/* Длинные подписи вроде «2160p · Все кодеки · Opus» распирали строку и
+   давали горизонтальный скролл всей страницы на узком экране. */
+.hist > span{min-width:0}
+@media (max-width:640px){
+  .hist{flex-wrap:wrap}
+  .hist__meta{white-space:normal; flex-basis:100%; order:3}
+}
 
 /* Banner */
 .banner{
