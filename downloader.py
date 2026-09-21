@@ -213,7 +213,9 @@ def probe(url: str) -> dict:
     heights = set()
     for f in info.get("formats") or []:
         h = f.get("height")
-        if h and f.get("vcodec") not in (None, "none"):
+        # None = кодек неизвестен, но видео у формата есть; отбрасываем
+        # только явное "none" (см. пояснение ниже про два разных значения).
+        if h and f.get("vcodec") != "none":
             heights.add(int(h))
     avail = [str(h) for h in sorted(heights, reverse=True) if str(h) in _HEIGHTS]
 
@@ -223,12 +225,16 @@ def probe(url: str) -> dict:
         fid = f.get("format_id")
         if not fid or f.get("format_note") == "storyboard":
             continue
-        v = f.get("vcodec") or "none"
-        a = f.get("acodec") or "none"
+        # Различаем два разных значения: строка "none" означает, что дорожки
+        # точно нет, а None — что кодек просто неизвестен. Многие экстракторы
+        # (кроме YouTube) кодеки не сообщают, и прежняя запись
+        # `f.get("vcodec") or "none"` превращала неизвестный в отсутствующий,
+        # из-за чего выбрасывались ВСЕ форматы таких сайтов.
+        v, a = f.get("vcodec"), f.get("acodec")
         if v == "none" and a == "none":
             continue
-        kind = ("audio" if v == "none" else
-                "video" if a == "none" else "both")
+        has_v, has_a = v != "none", a != "none"
+        kind = "both" if (has_v and has_a) else ("video" if has_v else "audio")
         formats.append({
             "format_id": fid,
             "kind": kind,
@@ -237,8 +243,9 @@ def probe(url: str) -> dict:
             "fps": f.get("fps"),
             "resolution": f.get("resolution") or (
                 f"{f.get('width')}x{f.get('height')}" if f.get("height") else None),
-            "vcodec": None if v == "none" else v.split(".")[0],
-            "acodec": None if a == "none" else a.split(".")[0],
+            # v/a может быть None (кодек неизвестен) — тогда split() упал бы
+            "vcodec": v.split(".")[0] if v and v != "none" else None,
+            "acodec": a.split(".")[0] if a and a != "none" else None,
             "abr": f.get("abr"),
             "tbr": f.get("tbr"),
             "filesize": f.get("filesize") or f.get("filesize_approx"),
