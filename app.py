@@ -50,10 +50,30 @@ def _client_ip() -> str:
     return request.remote_addr or "unknown"
 
 
+_hits_last_gc = 0.0
+
+
+def _gc_hits(now: float) -> None:
+    """Выкинуть ключи протухших окон.
+
+    Вызывается под _hits_lock. Без этого словарь рос бы вечно: каждый
+    новый IP оставлял запись навсегда, и достаточно было перебрать много
+    адресов, чтобы выесть память процесса.
+    """
+    global _hits_last_gc
+    if now - _hits_last_gc < 60:
+        return
+    _hits_last_gc = now
+    cutoff = now - config.RATE_WINDOW_SEC
+    for key in [k for k, q in _hits.items() if not q or q[-1] < cutoff]:
+        del _hits[key]
+
+
 def rate_ok(bucket: str, limit: int) -> bool:
     key = f"{bucket}:{_client_ip()}"
     now = time.time()
     with _hits_lock:
+        _gc_hits(now)
         q = _hits[key]
         while q and q[0] < now - config.RATE_WINDOW_SEC:
             q.popleft()

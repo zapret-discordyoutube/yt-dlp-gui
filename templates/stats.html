@@ -43,6 +43,10 @@
     </div>
   </div>
 
+  <div class="banner hidden" id="load-error" role="alert" style="margin-bottom:var(--s-4)">
+    <span>⚠</span><span id="load-error-text"></span>
+  </div>
+
   <!-- Плитки -->
   <div class="tiles" id="tiles">
     <div class="tile">
@@ -99,6 +103,9 @@
         <button type="button" role="radio" data-order="popular" aria-checked="false"
                 style="padding:6px 10px; font-size:12px">Популярные</button>
       </div>
+    </div>
+    <div class="banner hidden" id="feed-error" role="alert" style="margin-bottom:var(--s-3)">
+      <span>⚠</span><span id="feed-error-text"></span>
     </div>
     <div class="stack" id="feed"></div>
     <div class="empty" id="feed-empty">
@@ -164,8 +171,20 @@ const plural = (n, one, few, many) => {
 let DATA = null, period = "today", metric = "bytes_served";
 
 async function load() {
-  const r = await fetch("/api/stats");
-  DATA = await r.json();
+  let r;
+  try {
+    r = await fetch("/api/stats");
+    if (!r.ok) throw new Error(r.status === 429
+      ? "Слишком много запросов — подождите немного"
+      : `Сервер ответил ${r.status}`);
+    DATA = await r.json();
+  } catch (e) {
+    // молчать нельзя: иначе пустые плитки выглядят как «нет данных»
+    $("#load-error-text").textContent = e.message;
+    $("#load-error").classList.remove("hidden");
+    return;
+  }
+  $("#load-error").classList.add("hidden");
   render();
   renderChart();
   if (DATA.since) {
@@ -290,8 +309,21 @@ const relTime = (iso) => {
 
 async function loadFeed(reset) {
   if (reset) { feedOffset = 0; $("#feed").innerHTML = ""; }
-  const r = await fetch(`/api/feed?order=${feedOrder}&offset=${feedOffset}`);
-  const d = await r.json();
+  let d;
+  try {
+    const r = await fetch(`/api/feed?order=${feedOrder}&offset=${feedOffset}`);
+    if (!r.ok) throw new Error(r.status === 429
+      ? "Слишком много запросов — подождите немного"
+      : `Сервер ответил ${r.status}`);
+    d = await r.json();
+  } catch (e) {
+    // «Пока пусто» здесь было бы ложью — данные есть, их просто не отдали
+    $("#feed-empty").classList.add("hidden");
+    $("#feed-error-text").textContent = e.message;
+    $("#feed-error").classList.remove("hidden");
+    return;
+  }
+  $("#feed-error").classList.add("hidden");
   const items = d.items || [];
 
   $("#feed-empty").classList.toggle("hidden", !!($("#feed").children.length || items.length));
