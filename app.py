@@ -132,6 +132,7 @@ _MESSAGES = {
     "unknown_vaudio": "Неизвестный формат звука",
     "unknown_height": "Неизвестное разрешение",
     "unknown_kind": "Неизвестный тип",
+    "unknown_lang": "Неизвестный язык дорожки",
 }
 
 
@@ -252,6 +253,7 @@ def api_download():
                 acodec=str(data.get("acodec", "best")),
                 vcodec=str(data.get("vcodec", "auto")),
                 vaudio=str(data.get("vaudio", "auto")),
+                alang=str(data.get("alang", "")),
             )
     except ValueError as e:
         return err(message_for(e, "Неверный выбор формата"))

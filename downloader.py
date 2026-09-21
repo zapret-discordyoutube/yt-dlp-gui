@@ -24,6 +24,11 @@ import config
 # Всё строится из фиксированного перечня: kind + height + codec.
 _HEIGHTS = {"2160", "1440", "1080", "720", "480", "360"}
 
+# Код языка аудиодорожки (дубляж YouTube): en, ru, pt-BR, zh-Hans и т.п.
+# Строгая проверка: код уходит внутрь селектора формата yt-dlp, и без неё
+# это была бы инъекция произвольного селектора.
+_LANG_RE = re.compile(r"^[A-Za-z]{2,3}(-[A-Za-z]{2,8})?$")
+
 # Аудио-кодеки для режима «только аудио».
 # 'best' = оставить оригинальную дорожку без перекодирования (без потерь и быстро).
 _ACODECS = {
@@ -60,13 +65,21 @@ _VIDEO_AUDIO = {
 
 
 def build_format(kind: str, height: str = "auto", acodec: str = "best",
-                 vcodec: str = "auto", vaudio: str = "auto") -> tuple[str, dict, str]:
+                 vcodec: str = "auto", vaudio: str = "auto",
+                 alang: str = "") -> tuple[str, dict, str]:
     """Возвращает (format_selector, extra_opts, label) по безопасному выбору.
 
     kind='audio': acodec in {best,mp3,aac,opus}
     kind='video': height in {auto,2160..360}, vcodec in {auto,h264,av1,vp9},
                   vaudio in {auto,aac,opus}
+    alang: код языка аудиодорожки (дубляж), напр. 'ru'; '' = как в источнике.
     """
+    alang = (alang or "").strip()
+    if alang and not _LANG_RE.fullmatch(alang):
+        raise ValueError("unknown_lang")
+    # Фильтр языка для селектора аудио. Без языка — пусто.
+    lang_f = f"[language={alang}]" if alang else ""
+
     if kind == "audio":
         if acodec not in _ACODECS:
             raise ValueError("unknown_acodec")
@@ -81,14 +94,16 @@ def build_format(kind: str, height: str = "auto", acodec: str = "best",
         # это и потеря качества, и минуты ожидания на длинном ролике.
         # Для MP3 копирование невозможно: источники его не отдают.
         prefer = {
-            "aac":  "bestaudio[acodec^=mp4a]/bestaudio/best",
-            "opus": "bestaudio[acodec^=opus]/bestaudio/best",
-        }.get(acodec, "bestaudio/best")
+            "aac":  f"bestaudio{lang_f}[acodec^=mp4a]/bestaudio{lang_f}/bestaudio/best",
+            "opus": f"bestaudio{lang_f}[acodec^=opus]/bestaudio{lang_f}/bestaudio/best",
+        }.get(acodec, f"bestaudio{lang_f}/bestaudio/best")
         extra: dict = {"postprocessors": [pp]}
         if acodec == "mp3":
             # ffmpeg по умолчанию пишет ID3v2.4, а Windows Explorer показывает
             # встроенную обложку MP3 только у ID3v2.3. Форсируем 2.3.
             extra["postprocessor_args"] = {"default": ["-id3v2_version", "3"]}
+        if alang:
+            label = f"{label} · {alang}"
         return prefer, extra, label
 
     if kind == "video":
@@ -119,15 +134,20 @@ def build_format(kind: str, height: str = "auto", acodec: str = "best",
         #    голый `best` отдавал 1080p на запрос 360p, то есть кратно
         #    больше трафика и диска, чем просили.
         sel = "/".join(filter(None, [
-            f"{v}+bestaudio{afilter}" if afilter else None,
+            # Сначала выбранный язык (+ кодек), затем язык без кодека, затем
+            # дорожка как в источнике, затем общие послабления.
+            f"{v}+bestaudio{lang_f}{afilter}" if (lang_f or afilter) else None,
+            f"{v}+bestaudio{lang_f}" if lang_f else None,
             f"{v}+bestaudio",
             f"bestvideo{hfilter}+bestaudio" if vfilter else None,
             f"best{hfilter}{vfilter}" if vfilter else None,
             f"best{hfilter}",
             "worst" if hfilter else "best",
         ]))
-        label = " · ".join([hlabel, vlabel] + ([alabel] if vaudio != "auto" else []))
-        return sel, {"merge_output_format": container}, label
+        parts = [hlabel, vlabel] + ([alabel] if vaudio != "auto" else [])
+        if alang:
+            parts.append(alang)
+        return sel, {"merge_output_format": container}, " · ".join(parts)
 
     raise ValueError("unknown_kind")
 
@@ -527,6 +547,26 @@ def probe(url: str) -> dict:
     images = collect_images(info)
     is_gallery = bool(images) and not formats
 
+    # Языки аудиодорожек (дубляж YouTube). Показываем выбор только если их >1.
+    audio_langs, seen_langs = [], set()
+    for f in info.get("formats") or []:
+        if f.get("acodec") in (None, "none") or f.get("vcodec") not in (None, "none"):
+            continue
+        code = f.get("language")
+        if not code or code in seen_langs or not _LANG_RE.fullmatch(code):
+            continue
+        seen_langs.add(code)
+        note = f.get("format_note") or ""
+        # «Russian, low» -> «Russian»; «English original (default), low» -> ...
+        lbl = note.split(",")[0].strip() or code
+        audio_langs.append({"code": code, "label": lbl,
+                            "original": "original" in note.lower()})
+    if len(audio_langs) < 2:
+        audio_langs = []
+    else:
+        # Оригинал наверх, остальные — по алфавиту.
+        audio_langs.sort(key=lambda x: (not x["original"], x["label"].lower()))
+
     return {
         "formats": formats,
         "id": info.get("id"),
@@ -541,6 +581,7 @@ def probe(url: str) -> dict:
         "is_gallery": is_gallery,
         "image_count": len(images),
         "via_egress": via_egress,
+        "audio_langs": audio_langs,
     }
 
 
