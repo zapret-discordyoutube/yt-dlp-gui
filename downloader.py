@@ -262,6 +262,8 @@ def probe(url: str) -> dict:
         "skip_download": True,
         "noplaylist": True,
         "socket_timeout": 20,
+        # без своего логгера yt-dlp печатает ошибки со ссылкой в stderr
+        "logger": _QuietLogger(),
         **({"proxy": config.PROXY} if config.PROXY else {}),
     }
     with yt_dlp.YoutubeDL(opts) as ydl:
@@ -620,6 +622,7 @@ class DownloadManager:
                 "socket_timeout": 30,
                 "retries": 5,
                 "concurrent_fragment_downloads": config.CONCURRENT_FRAGMENTS,
+                "logger": _QuietLogger(),
                 **({"proxy": config.PROXY} if config.PROXY else {}),
                 "format": fmt,
                 "max_filesize": config.MAX_FILESIZE_MB * 1024 * 1024,
@@ -690,6 +693,37 @@ class DownloadManager:
 
 class Overloaded(Exception):
     """Очередь или таблица задач переполнены."""
+
+
+class _QuietLogger:
+    """Перехватывает вывод yt-dlp, чтобы ссылки не попадали в журнал.
+
+    Опции quiet и no_warnings глушат обычные сообщения, но ОШИБКИ yt-dlp
+    всё равно печатает в stderr — вместе с полным адресом, который вставил
+    пользователь. systemd подхватывает stderr, и ссылки оседают в journald,
+    хотя сервис обещает их не записывать.
+
+    Текст ошибки нам всё равно возвращается через исключение, поэтому
+    здесь достаточно ничего не печатать; для диагностики оставляем только
+    домен, без пути и параметров.
+    """
+
+    def debug(self, msg):
+        pass
+
+    def info(self, msg):
+        pass
+
+    def warning(self, msg):
+        pass
+
+    def error(self, msg):
+        # Не логируем НИЧЕГО из текста ошибки. Вырезать оттуда ссылку
+        # недостаточно: yt-dlp подставляет в сообщение идентификатор,
+        # выкроенный из пути, и в нём может оказаться токен из адреса
+        # (проверено на реальной ссылке). Домен и класс ошибки пишутся
+        # отдельно в _run — этого хватает для диагностики.
+        pass
 
 
 def _host_of(url: str) -> str:
