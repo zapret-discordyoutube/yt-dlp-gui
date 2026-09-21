@@ -27,7 +27,7 @@ TASKS_MAX = int(os.environ.get("YTG_TASKS_MAX", "500"))
 # YouTube троттлит каждое соединение, поэтому скорость даёт параллельность.
 # 8 — быстро; устойчивость к редким TLS-таймаутам обеспечивают ретраи ниже,
 # а не снижение параллельности (при 4 скорость падала вдвое).
-CONCURRENT_FRAGMENTS = int(os.environ.get("YTG_CONCURRENT_FRAGMENTS", "8"))
+CONCURRENT_FRAGMENTS = int(os.environ.get("YTG_CONCURRENT_FRAGMENTS", "16"))
 
 # Прокси для исходящих запросов yt-dlp (socks5://host:port или http://...).
 # Задаётся ТОЛЬКО администратором через окружение и никогда не принимается
