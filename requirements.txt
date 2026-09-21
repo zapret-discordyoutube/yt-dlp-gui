@@ -3,3 +3,6 @@ gunicorn==26.2.0
 Jinja2==3.1.6
 Werkzeug==3.1.8
 yt-dlp==2026.8.19
+# Браузерный impersonate для yt-dlp: без него сайты за Cloudflare/анти-ботом
+# (kick.com, pornhub и др.) отдают 403/404. yt-dlp сам его подхватывает.
+curl_cffi==0.16.3

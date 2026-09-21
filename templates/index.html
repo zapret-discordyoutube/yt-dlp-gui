@@ -186,8 +186,10 @@
       </div>
     </div>
   </section>
+</main>
 
-  <section class="section">
+<section class="note-band">
+  <div class="note-band__in">
     <div class="note">
       <span aria-hidden="true">🔒</span>
       <span><strong>Что мы храним, а что нет.</strong>
@@ -198,8 +200,8 @@
       Без привязки к тому, кто именно скачивал.
       Названия и обложки в ленте ваш браузер берёт напрямую с YouTube — у нас их нет.</span>
     </div>
-  </section>
-</main>
+  </div>
+</section>
 
 <footer class="footer">
   <div class="footer__in">
@@ -671,6 +673,9 @@ function renderHistory() {
   }));
 }
 $("#clear-history").addEventListener("click", () => {
+  const hist = store.get(LS_HISTORY, []);
+  if (!hist.length) { toast("История уже пуста"); return; }
+  if (!confirm(`Очистить историю (${hist.length})? Это действие нельзя отменить.`)) return;
   store.set(LS_HISTORY, []); renderHistory(); toast("История очищена");
 });
 

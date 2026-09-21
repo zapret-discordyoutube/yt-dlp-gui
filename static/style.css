@@ -341,6 +341,14 @@ select.input{height:40px; font-size:14px; border-radius:var(--r-md); padding:0 v
   border-radius:var(--r-md); padding:var(--s-4);
   color:var(--text-muted); font-size:13px; display:flex; gap:var(--s-3);
 }
+/* Плашка приватности — полоса во всю ширину. Фон/границу задаёт полоса, а
+   не внутренняя карточка, поэтому текст ложится ровно от края до края. */
+.note-band{margin-top:var(--s-10); padding-block:var(--s-5);
+  background:var(--surface-1); border-block:1px solid var(--border)}
+.note-band__in{width:100%; padding-inline:clamp(16px, 4vw, 40px)}
+.note-band .note{background:none; border:0; border-radius:0; padding:0;
+  align-items:flex-start; line-height:1.6}
+.note-band .note > span:first-child{flex:none; margin-top:1px}
 .note strong{color:var(--text-secondary)}
 
 /* Toasts */
@@ -366,9 +374,13 @@ select.input{height:40px; font-size:14px; border-radius:var(--r-md); padding:0 v
 
 .footer{margin-top:var(--s-12); padding-block:var(--s-8);
   border-top:1px solid var(--border);
-  color:var(--text-muted); font-size:12px; text-align:center}
-.footer__in{width:100%; padding-inline:clamp(16px, 4vw, 40px)}
+  color:var(--text-muted); font-size:12.5px}
+/* Во всю ширину, с такими же боковыми отступами, как у шапки. Текст слева,
+   строки с воздухом между собой — чтобы читалось, а не сливалось в «кашу». */
+.footer__in{width:100%; padding-inline:clamp(16px, 4vw, 40px);
+  display:flex; flex-direction:column; gap:8px; text-align:left}
 .footer a{color:var(--text-secondary)}
+.footer a:hover{color:var(--text)}
 
 /* Прямой эфир */
 .live-note{font-size:12px; color:var(--text-muted); line-height:1.5}
