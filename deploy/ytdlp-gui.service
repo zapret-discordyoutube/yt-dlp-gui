@@ -1,0 +1,56 @@
+[Unit]
+Description=yt-grab — веб-GUI для yt-dlp (yt.zapret.moe)
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=simple
+User=codex-pve
+Group=codex-pve
+WorkingDirectory=/home/codex-pve/ytdlp-gui
+
+# Домашняя папка примонтирована только на чтение (ProtectHome),
+# а gunicorn пишет туда управляющий сокет — уводим его в приватный /tmp.
+Environment=HOME=/tmp
+Environment=YTG_HOST=127.0.0.1
+Environment=YTG_PORT=8090
+Environment=YTG_TRUST_PROXY=1
+Environment=YTG_MAX_CONCURRENT=3
+Environment=YTG_MAX_FILESIZE_MB=2048
+Environment=YTG_DISK_QUOTA_MB=20480
+Environment=YTG_QUIET_ACCESS_LOG=1
+
+# Один воркер: состояние задач держится в памяти процесса.
+# Потоки обслуживают SSE-соединения и параллельные запросы.
+ExecStart=/home/codex-pve/ytdlp-gui/.venv/bin/gunicorn \
+    --workers 1 \
+    --threads 16 \
+    --timeout 0 \
+    --graceful-timeout 30 \
+    --bind 127.0.0.1:8090 \
+    --access-logfile /dev/null \
+    --error-logfile - \
+    app:app
+
+Restart=on-failure
+RestartSec=5
+
+# --- Изоляция ---
+NoNewPrivileges=yes
+PrivateTmp=yes
+ProtectSystem=strict
+ProtectHome=read-only
+ReadWritePaths=/home/codex-pve/ytdlp-gui/downloads
+ProtectKernelTunables=yes
+ProtectKernelModules=yes
+ProtectControlGroups=yes
+RestrictSUIDSGID=yes
+RestrictNamespaces=yes
+LockPersonality=yes
+
+# --- Лимиты ресурсов ---
+MemoryMax=2G
+TasksMax=256
+
+[Install]
+WantedBy=multi-user.target
