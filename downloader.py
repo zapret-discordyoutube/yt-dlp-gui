@@ -378,7 +378,9 @@ def probe(url: str) -> dict:
         "no_warnings": True,
         "skip_download": True,
         "noplaylist": True,
-        "socket_timeout": 20,
+        # 30с, а не 20: некоторые сайты (pornhub и пр.) отвечают медленно из
+        # дата-центра и делают несколько запросов подряд — на 20с не укладывались.
+        "socket_timeout": 30,
         # без своего логгера yt-dlp печатает ошибки со ссылкой в stderr
         "logger": _QuietLogger(),
         **({"proxy": config.PROXY} if config.PROXY else {}),
