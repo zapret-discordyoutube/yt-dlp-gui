@@ -974,7 +974,11 @@ class DownloadManager:
                     "noprogress": True,   # не писать активность пользователя в лог
                     "consoletitle": False,
                     "socket_timeout": 30,
-                    "retries": 5,
+                    # Устойчивость к транзиентным сбоям googlevideo (TLS-таймаут
+                    # фрагмента иначе ронял всю загрузку на середине).
+                    "retries": 10,
+                    "fragment_retries": 20,
+                    "file_access_retries": 5,
                     "concurrent_fragment_downloads": config.CONCURRENT_FRAGMENTS,
                     "logger": _QuietLogger(),
                     **({"proxy": self._task_proxy(task)}
