@@ -259,7 +259,12 @@ select.input{height:40px; font-size:14px; border-radius:var(--r-md); padding:0 v
 /* History */
 .hist{display:flex; align-items:center; gap:var(--s-3); padding:10px var(--s-3); border-radius:var(--r-sm)}
 .hist:hover{background:var(--surface-2)}
-.hist__name{flex:1; min-width:0; color:var(--text-secondary); overflow:hidden; text-overflow:ellipsis; white-space:nowrap}
+.hist__name{display:block; color:var(--text-secondary); overflow:hidden; text-overflow:ellipsis; white-space:nowrap}
+.hist__url{
+  display:block; color:var(--text-muted); font-size:12px; font-family:var(--font-mono);
+  overflow:hidden; text-overflow:ellipsis; white-space:nowrap; text-decoration:none;
+}
+.hist__url:hover{color:var(--accent); text-decoration:underline}
 .hist__meta{color:var(--text-muted); font-size:12px; font-variant-numeric:tabular-nums; white-space:nowrap}
 
 /* Banner */
@@ -757,7 +762,7 @@ function updateCount() {
 function addHistory(t) {
   const hist = store.get(LS_HISTORY, []);
   hist.unshift({ title: t.title, label: t.label, filename: t.filename,
-                 filesize: t.filesize, at: Date.now() });
+                 filesize: t.filesize, url: t.url, at: Date.now() });
   store.set(LS_HISTORY, hist.slice(0, 50));
   renderHistory();
 }
@@ -770,12 +775,26 @@ function renderHistory() {
   hist.forEach(h => {
     const d = document.createElement("div");
     d.className = "hist";
+    const when = h.at ? new Date(h.at).toLocaleDateString("ru-RU",
+      { day: "2-digit", month: "2-digit", hour: "2-digit", minute: "2-digit" }) : "";
     d.innerHTML = `
       <span aria-hidden="true">🎬</span>
-      <span class="hist__name" title="${esc(h.title)}">${esc(h.title)}</span>
-      <span class="hist__meta">${esc(h.label || "")} · ${fmtBytes(h.filesize)}</span>`;
+      <span style="min-width:0; flex:1">
+        <span class="hist__name" title="${esc(h.title)}">${esc(h.title)}</span>
+        ${h.url ? `<a class="hist__url" href="${esc(h.url)}" target="_blank"
+           rel="noopener noreferrer" title="${esc(h.url)}">${esc(h.url)}</a>` : ""}
+      </span>
+      <span class="hist__meta">${esc(h.label || "")} · ${fmtBytes(h.filesize)}${when ? " · " + when : ""}</span>
+      ${h.url ? `<button class="icon-btn" data-again="${esc(h.url)}"
+         aria-label="Скачать снова" title="Скачать снова">↻</button>` : ""}`;
     box.appendChild(d);
   });
+  // повторная загрузка: подставить ссылку и сразу проверить
+  box.querySelectorAll("[data-again]").forEach(b => b.addEventListener("click", () => {
+    $("#url").value = b.dataset.again;
+    window.scrollTo({ top: 0, behavior: "smooth" });
+    $("#url-form").requestSubmit();
+  }));
 }
 $("#clear-history").addEventListener("click", () => {
   store.set(LS_HISTORY, []); renderHistory(); toast("История очищена");

@@ -186,16 +186,19 @@ def api_file(tid):
     t = manager.get(tid)
     if not t:
         return err("Задача не найдена", 404)
+    if t.status == "served":
+        return err("Файл уже удалён с сервера — запустите загрузку заново", 410)
     if t.status != "finished" or not t.filename:
         return err("Файл ещё не готов", 409)
     path = dl.safe_download_path(t.filename)
     if not path:
-        return err("Файл больше недоступен", 410)
+        return err("Файл удалён с сервера — запустите загрузку заново", 410)
 
     # Отмечаем момент выдачи; уборщик удалит файл через grace-период.
     # Не используем resp.call_on_close: send_file включает direct_passthrough,
     # и WSGI закрывает файловую обёртку, а не Response — колбэк не сработает.
-    resp = send_file(path, as_attachment=True, download_name=t.filename)
+    resp = send_file(path, as_attachment=True,
+                     download_name=t.display_name or t.filename)
     if config.DELETE_AFTER_SERVE and t.served_at is None:
         t.served_at = time.time()
     return resp

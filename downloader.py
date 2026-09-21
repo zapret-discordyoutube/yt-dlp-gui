@@ -187,7 +187,8 @@ class Task:
     speed: float | None = None
     eta: int | None = None
     total_bytes: int | None = None
-    filename: str | None = None  # basename готового файла
+    filename: str | None = None      # безопасный basename на диске: <id>.<ext>
+    display_name: str | None = None  # красивое имя для пользователя (с кириллицей)
     filesize: int | None = None
     error: str | None = None
     created_at: float = field(default_factory=time.time)
@@ -205,7 +206,7 @@ class Task:
             "percent": self.percent,
             "speed": self.speed,
             "eta": self.eta,
-            "filename": self.filename,
+            "filename": self.display_name,
             "filesize": self.filesize,
             "error": self.error,
             "created_at": self.created_at,
@@ -338,9 +339,11 @@ class DownloadManager:
             fmt, extra = task.fmt, task.extra
             opts = {
                 "paths": {"home": str(config.DOWNLOAD_DIR)},
-                "outtmpl": {"default": "%(title).150B [%(id)s].%(ext)s"},
-                "restrictfilenames": True,
-                "windowsfilenames": True,
+                # Имя на диске задаём сами: только id задачи. Так оно не зависит
+                # от заголовка (кириллица, эмодзи, точки) и не может содержать
+                # разделителей пути. Красивое имя пользователь получает через
+                # download_name при отдаче.
+                "outtmpl": {"default": f"{task.id}.%(ext)s"},
                 "noplaylist": True,
                 "quiet": True,
                 "no_warnings": True,
@@ -374,7 +377,9 @@ class DownloadManager:
                 self._cleanup_partials(task)
                 return
             if final and os.path.exists(final):
-                task.filename = os.path.basename(final)
+                task.filename = os.path.basename(final)          # <id>.<ext>
+                ext = os.path.splitext(final)[1]
+                task.display_name = pretty_filename(task.title, ext)
                 task.filesize = os.path.getsize(final)
                 task.percent = 100
                 task.status = "finished"
@@ -394,7 +399,8 @@ class DownloadManager:
             self.sema.release()
 
     def _cleanup_partials(self, task: Task) -> None:
-        for p in config.DOWNLOAD_DIR.glob("*.part"):
+        # только файлы этой задачи: имена начинаются с её id
+        for p in config.DOWNLOAD_DIR.glob(f"{task.id}.*"):
             try:
                 p.unlink()
             except OSError:
@@ -407,12 +413,31 @@ def _clean_err(msg: str) -> str:
     return msg[:300] if msg else "Ошибка скачивания"
 
 
+def pretty_filename(title: str, ext: str) -> str:
+    """Имя, которое увидит пользователь. Кириллицу сохраняем — её корректно
+    закодирует Content-Disposition (RFC 5987). Убираем только то, что ломает
+    файловые системы."""
+    name = (title or "видео").strip()
+    name = re.sub(r"[\\/:*?\"<>|\x00-\x1f]", "", name)   # запрещённые символы
+    name = re.sub(r"\s+", " ", name).strip(" .")          # схлопнуть пробелы, снять точки по краям
+    if not name:
+        name = "видео"
+    return name[:120] + ext
+
+
 def safe_download_path(basename: str) -> Path | None:
-    """Защита от path traversal при отдаче файла."""
-    if not basename or "/" in basename or "\\" in basename or ".." in basename:
+    """Защита от path traversal при отдаче файла.
+
+    Имя на диске мы генерируем сами (<id>.<ext>), но проверку оставляем:
+    полагаемся на разрешение реального пути, а не на поиск подстроки '..' —
+    та отвергала легитимные имена (например, заголовок, кончающийся на '..').
+    """
+    if not basename or "\x00" in basename:
         return None
-    target = (config.DOWNLOAD_DIR / basename).resolve()
+    if os.path.basename(basename) != basename:   # любые разделители пути
+        return None
     root = config.DOWNLOAD_DIR.resolve()
-    if not str(target).startswith(str(root) + os.sep):
+    target = (root / basename).resolve()
+    if target.parent != root:                    # только прямой потомок
         return None
     return target if target.is_file() else None
