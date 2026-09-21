@@ -171,6 +171,46 @@ _FORMAT_KEYWORDS = {
 }
 
 
+def parse_timecode(s: str) -> float | None:
+    """'90' | '1:30' | '1:02:03' | '1:30.5' -> секунды. Пусто/мусор -> None."""
+    s = (s or "").strip()
+    if not s:
+        return None
+    if not re.fullmatch(r"\d{1,3}(:[0-5]?\d){0,2}(\.\d{1,3})?", s):
+        return None
+    sec = 0.0
+    for part in s.split(":"):
+        sec = sec * 60 + float(part)
+    return sec
+
+
+def clip_extra(from_s: str, to_s: str) -> tuple[dict, str]:
+    """Опции yt-dlp для скачивания только отрезка [from..to] и подпись.
+
+    Диапазон строится из чисел (таймкоды разобраны), инъекция невозможна.
+    Пустой отрезок -> ({}, "").
+    """
+    start = parse_timecode(from_s)
+    end = parse_timecode(to_s)
+    if start is None and end is None:
+        return {}, ""
+    if start is None:
+        start = 0.0
+    if end is not None and end <= start:
+        raise ValueError("bad_clip")
+    rng_end = end if end is not None else float("inf")
+    extra = {
+        "download_ranges": yt_dlp.utils.download_range_func(None, [(start, rng_end)]),
+        # Точная резка по границам: без этого концы съезжают к ключевым кадрам.
+        "force_keyframes_at_cuts": True,
+    }
+    def fmt_t(x):
+        x = int(x); h, m, s = x // 3600, (x % 3600) // 60, x % 60
+        return f"{h}:{m:02d}:{s:02d}" if h else f"{m}:{s:02d}"
+    lbl = f"{fmt_t(start)}–{fmt_t(end) if end is not None else 'конец'}"
+    return extra, lbl
+
+
 def build_from_format_id(format_id: str, container: str = "auto") -> tuple[str, dict, str]:
     """Точный выбор формата из того, что yt-dlp отдал для этого URL."""
     fid = (format_id or "").strip()

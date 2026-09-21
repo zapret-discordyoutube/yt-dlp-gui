@@ -153,6 +153,23 @@
           </div>
         </div>
 
+        <!-- Отрезок (необязательно) -->
+        <div class="row hidden" id="clip-row" style="margin-top:var(--s-4)">
+          <div class="field">
+            <label for="clip-from">Отрезок — с</label>
+            <input class="input" id="clip-from" type="text" inputmode="numeric"
+                   placeholder="напр. 1:30" autocomplete="off" spellcheck="false">
+          </div>
+          <div class="field">
+            <label for="clip-to">по</label>
+            <input class="input" id="clip-to" type="text" inputmode="numeric"
+                   placeholder="напр. 2:45" autocomplete="off" spellcheck="false">
+          </div>
+          <p class="meta" style="flex-basis:100%; margin:0">
+            Пусто — весь ролик. Время: секунды (90) или M:SS (1:30) / H:MM:SS.
+          </p>
+        </div>
+
         <!-- Постобработка -->
         <div class="pp-opts" id="pp-opts" style="margin-top:var(--s-4)">
           <label class="chk"><input type="checkbox" id="pp-embed_subs"><span>Встроить субтитры</span></label>
@@ -516,6 +533,9 @@ function setMode(mode) {
   $("#opts-audio").classList.toggle("hidden", mode !== "audio");
   $("#opts-all").classList.toggle("hidden", mode !== "all");
   updateAlangRow();
+  // Отрезок доступен для видео и аудио (не для «Все форматы» и галерей).
+  $("#clip-row").classList.toggle("hidden",
+    (current && current.is_gallery) || !(mode === "video" || mode === "audio"));
   updateSizeEst();
 }
 document.querySelectorAll("#mode-seg button").forEach(b =>
@@ -576,6 +596,12 @@ $("#download-btn").addEventListener("click", async () => {
     // Язык звука — только для видео/аудио и только если дорожек несколько.
     if (settings.mode !== "all" && (current.audio_langs || []).length && settings.alang) {
       body.alang = settings.alang;
+    }
+    // Отрезок — только для видео/аудио.
+    if (settings.mode !== "all") {
+      const cf = $("#clip-from").value.trim(), ct = $("#clip-to").value.trim();
+      if (cf) body.clip_from = cf;
+      if (ct) body.clip_to = ct;
     }
     PP_KEYS.forEach(k => { if (settings.pp[k]) body[k] = true; });
   }
