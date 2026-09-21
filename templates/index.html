@@ -145,6 +145,14 @@
           <p class="meta" style="margin-top:8px">Форматы только с видео или только со звуком будут объединены автоматически.</p>
         </div>
 
+        <!-- Язык звука (дубляж) -->
+        <div class="row hidden" id="alang-row" style="margin-top:var(--s-4)">
+          <div class="field" style="flex-basis:100%">
+            <label for="sel-alang">Язык звука</label>
+            <select class="input" id="sel-alang"></select>
+          </div>
+        </div>
+
         <!-- Постобработка -->
         <div class="pp-opts" id="pp-opts" style="margin-top:var(--s-4)">
           <label class="chk"><input type="checkbox" id="pp-embed_subs"><span>Встроить субтитры</span></label>
@@ -256,7 +264,7 @@ const store = {
 };
 let settings = Object.assign(
   { mode: "video", height: "auto", vcodec: "auto", vaudio: "auto",
-    acodec: "best", theme: null, pp: {} },
+    acodec: "best", theme: null, pp: {}, alang: "" },
   store.get(LS_SETTINGS, {})
 );
 if (!settings.pp || typeof settings.pp !== "object") settings.pp = {};
@@ -397,6 +405,22 @@ function renderPreview(d) {
 
   renderFormats(d.formats || []);
 
+  // Языки аудиодорожек (дубляж): заполняем селектор, если их несколько.
+  const langs = d.audio_langs || [];
+  const alsel = $("#sel-alang");
+  if (langs.length) {
+    alsel.innerHTML = "";
+    langs.forEach(l => {
+      const o = document.createElement("option");
+      o.value = l.code;
+      o.textContent = l.label + (l.original ? " · оригинал" : "");
+      alsel.appendChild(o);
+    });
+    alsel.value = langs.some(l => l.code === settings.alang)
+      ? settings.alang : (langs.find(l => l.original) || langs[0]).code;
+    settings.alang = alsel.value;
+  }
+
   // Пост-галерея (фото без видео): прячем выбор формата, качаем архивом.
   const gallery = !!d.is_gallery;
   $("#pv-gallery").classList.toggle("hidden", !gallery);
@@ -474,6 +498,15 @@ function updateSizeEst() {
   }
 }
 
+/* Строку выбора языка звука показываем только в режимах видео/аудио, когда у
+   ролика реально несколько аудиодорожек. */
+function updateAlangRow() {
+  const langs = (current && current.audio_langs) || [];
+  const show = langs.length && !(current && current.is_gallery)
+    && (settings.mode === "video" || settings.mode === "audio");
+  $("#alang-row").classList.toggle("hidden", !show);
+}
+
 /* ---------- Переключение режима ---------- */
 function setMode(mode) {
   settings.mode = mode; saveSettings();
@@ -482,6 +515,7 @@ function setMode(mode) {
   $("#opts-video").classList.toggle("hidden", mode !== "video");
   $("#opts-audio").classList.toggle("hidden", mode !== "audio");
   $("#opts-all").classList.toggle("hidden", mode !== "all");
+  updateAlangRow();
   updateSizeEst();
 }
 document.querySelectorAll("#mode-seg button").forEach(b =>
@@ -496,6 +530,10 @@ document.querySelectorAll("#mode-seg button").forEach(b =>
 });
 /* Выбор конкретного формата во «Все форматы» тоже меняет оценку. */
 $("#fmt-list").addEventListener("change", updateSizeEst);
+/* Язык звука. */
+$("#sel-alang").addEventListener("change", (e) => {
+  settings.alang = e.target.value; saveSettings();
+});
 
 /* Чекбоксы постобработки: восстановление и сохранение выбора. */
 PP_KEYS.forEach(k => {
@@ -534,6 +572,10 @@ $("#download-btn").addEventListener("click", async () => {
     } else {
       body.kind = "video"; body.height = settings.height;
       body.vcodec = settings.vcodec; body.vaudio = settings.vaudio;
+    }
+    // Язык звука — только для видео/аудио и только если дорожек несколько.
+    if (settings.mode !== "all" && (current.audio_langs || []).length && settings.alang) {
+      body.alang = settings.alang;
     }
     PP_KEYS.forEach(k => { if (settings.pp[k]) body[k] = true; });
   }
