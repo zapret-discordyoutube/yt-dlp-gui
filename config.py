@@ -79,7 +79,9 @@ FEED_ENABLED = os.environ.get("YTG_FEED_ENABLED", "1") == "1"
 FEED_PAGE_SIZE = int(os.environ.get("YTG_FEED_PAGE_SIZE", "50"))
 # Сколько хранить времена отдельных скачиваний. Таблица растёт на строку с
 # каждой загрузкой, и без предела превращается в вечный журнал активности.
-EVENT_RETENTION_DAYS = int(os.environ.get("YTG_EVENT_RETENTION_DAYS", "90"))
+# Одна запись — около 190 байт с индексами, так что год при ~1000 загрузках
+# в сутки — это ~70 МБ. Держим наравне с лентой (FEED_RETENTION_DAYS).
+EVENT_RETENTION_DAYS = int(os.environ.get("YTG_EVENT_RETENTION_DAYS", "365"))
 
 # Через сколько считать задачу зависшей и снимать её. Отдельная настройка,
 # а не множитель от TASK_TTL: прежняя запись `TASK_TTL_MINUTES * 120`

@@ -20,7 +20,7 @@
 <body>
 
 <header class="topbar">
-  <div class="wrap topbar__in">
+  <div class="topbar__in">
     <div class="brand">
       <span class="brand__mark" aria-hidden="true">▼</span>
       <span>yt-grab <span class="brand__sub">· статистика</span></span>
@@ -137,12 +137,14 @@
       — и больше ничего. Ни названий, ни обложек, ни размеров, ни того, кто скачивал: ни IP,
       ни сессии, ни учётных записей. Названия и картинки ваш браузер забирает напрямую с
       YouTube, сервер их не видит и не хранит. Сами видеофайлы не сохраняются — удаляются
-      вскоре после выдачи. Времена скачиваний хранятся 90 дней, затем стираются.
+      вскоре после выдачи. Времена скачиваний хранятся год, затем стираются.
       <span id="since-note"></span></span>
     </div>
   </section>
+</main>
 
-  <footer>
+<footer class="footer">
+  <div class="footer__in">
     <p><a href="/">yt-grab</a> — открытая обёртка над
       <a href="https://github.com/yt-dlp/yt-dlp" rel="noopener noreferrer" target="_blank">yt-dlp</a>.
       <a href="https://git.zapret.moe/zapretdiscordyoutube/yt-dlp-gui" rel="noopener noreferrer" target="_blank">Исходный код</a>.</p>
@@ -151,8 +153,8 @@
       <a href="https://t.me/zapretvpns_bot" rel="noopener noreferrer" target="_blank">поддержать проект</a>,
       <a href="https://t.me/bypassblock" rel="noopener noreferrer" target="_blank">канал</a>.
     </p>
-  </footer>
-</main>
+  </div>
+</footer>
 
 <script>
 "use strict";

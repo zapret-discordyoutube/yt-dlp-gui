@@ -19,7 +19,7 @@
 <body>
 
 <header class="topbar">
-  <div class="wrap topbar__in">
+  <div class="topbar__in">
     <div class="brand">
       <span class="brand__mark" aria-hidden="true">▼</span>
       <span>yt-grab <span class="brand__sub">· zapret.moe</span></span>
@@ -177,13 +177,15 @@
       <em>Не храним:</em> сами видеофайлы (удаляются сразу после выдачи), ваш IP, ваши личные настройки
       и вашу историю — она лежит только в этом браузере и на сервер не уходит.
       <em>Храним:</em> адрес скачанного ролика и время каждого скачивания — это попадает в
-      публичную <a href="/stats">ленту «что скачивают»</a> и стирается через 90 дней.
+      публичную <a href="/stats">ленту «что скачивают»</a> и стирается через год.
       Без привязки к тому, кто именно скачивал.
       Названия и обложки в ленте ваш браузер берёт напрямую с YouTube — у нас их нет.</span>
     </div>
   </section>
+</main>
 
-  <footer>
+<footer class="footer">
+  <div class="footer__in">
     <p>yt-grab — открытая обёртка над
       <a href="https://github.com/yt-dlp/yt-dlp" rel="noopener noreferrer" target="_blank">yt-dlp</a>.
       <a href="https://git.zapret.moe/zapretdiscordyoutube/yt-dlp-gui" rel="noopener noreferrer" target="_blank">Исходный код</a>.
@@ -194,8 +196,8 @@
       это оплачивает сервер и трафик. Новости и обсуждение —
       <a href="https://t.me/bypassblock" rel="noopener noreferrer" target="_blank">в нашем канале</a>.
     </p>
-  </footer>
-</main>
+  </div>
+</footer>
 
 <div class="toasts" id="toasts" aria-live="polite" role="status"></div>
 
