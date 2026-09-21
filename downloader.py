@@ -422,9 +422,6 @@ def probe(url: str) -> dict:
         # ошибкой «No video formats found»; так мы их разбираем и предлагаем фото.
         "ignore_no_formats_error": True,
         "noplaylist": True,
-        # тот же клиент YouTube, что и при загрузке (см. пояснение в _run):
-        # стабильнее и без экспериментального visionos.
-        "extractor_args": {"youtube": {"player_client": ["default"]}},
         # 30с, а не 20: некоторые сайты (pornhub и пр.) отвечают медленно из
         # дата-центра и делают несколько запросов подряд — на 20с не укладывались.
         "socket_timeout": 30,
@@ -886,10 +883,6 @@ class DownloadManager:
                     "socket_timeout": 30,
                     "retries": 5,
                     "concurrent_fragment_downloads": config.CONCURRENT_FRAGMENTS,
-                    # Явный клиент YouTube: авто-выбор цеплял экспериментальный
-                    # visionos с троттлеными ссылками, из-за чего скорость рвалась.
-                    # default (веб) с deno-решением nsig качает стабильно быстрее.
-                    "extractor_args": {"youtube": {"player_client": ["default"]}},
                     "logger": _QuietLogger(),
                     **({"proxy": config.PROXY} if config.PROXY else {}),
                     # Эфир пишем в MPEG-TS: такой контейнер остаётся
