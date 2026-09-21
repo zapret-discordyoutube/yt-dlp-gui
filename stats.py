@@ -1,14 +1,20 @@
 """Обезличенная статистика использования.
 
-Храним ТОЛЬКО агрегированные счётчики по дням: сколько запросов, сколько
-загрузок, сколько байт отдано. Никаких URL, заголовков, IP, User-Agent —
-ничего, что связывало бы событие с человеком. Это совместимо с обещанием
-«мы не храним вашу историю»: по этим числам нельзя восстановить, кто и что
-скачивал.
+Храним три вида записей и ничего больше:
+ * суточные счётчики (запросы, загрузки, отданные байты);
+ * ленту скачанного: адрес ролика, первая и последняя даты, счётчик;
+ * времена отдельных скачиваний, ОКРУГЛЁННЫЕ ДО МИНУТЫ.
+
+Ни IP, ни User-Agent, ни заголовков, ни сессий. Округление времени —
+не косметика: при небольшом трафике точная метка однозначно выделяет
+сеанс, и тот, кто знает, когда человек заходил, узнал бы, что он скачал.
+Округление до минуты сохраняет смысл «когда это было» и убирает
+возможность сопоставления по совпадению момента.
 """
 from __future__ import annotations
 
 import contextlib
+import logging
 import sqlite3
 import threading
 from datetime import date, datetime, timedelta, timezone
@@ -42,33 +48,104 @@ CREATE TABLE IF NOT EXISTS feed (
 );
 CREATE INDEX IF NOT EXISTS feed_last  ON feed(last_seen DESC);
 CREATE INDEX IF NOT EXISTS feed_count ON feed(count DESC);
+
+-- Отдельные события: время КАЖДОГО скачивания, а не только первого и
+-- последнего. Здесь по-прежнему нет ничего о том, КТО скачивал — только
+-- адрес ролика и момент времени.
+CREATE TABLE IF NOT EXISTS events (
+    id  INTEGER PRIMARY KEY AUTOINCREMENT,
+    url TEXT NOT NULL,
+    at  TEXT NOT NULL
+);
+CREATE INDEX IF NOT EXISTS events_url ON events(url, at DESC);
+CREATE INDEX IF NOT EXISTS events_at  ON events(at);
 """
+
+
+_conn: sqlite3.Connection | None = None
 
 
 @contextlib.contextmanager
 def _connect():
-    """Соединение с гарантированным закрытием.
+    """Одно долгоживущее соединение на весь процесс.
 
-    sqlite3.Connection.__exit__ фиксирует транзакцию, но НЕ закрывает
-    соединение: дескрипторы держались до сборки мусора и при нагрузке
-    упирались в лимит открытых файлов процесса.
+    Соединение на каждый вызов давало две беды сразу. Без закрытия
+    дескрипторы копились до сборки мусора и упирались в лимит открытых
+    файлов. А с закрытием становилось ещё хуже: в режиме WAL SQLite
+    выполняет контрольную точку при закрытии ПОСЛЕДНЕГО соединения, то
+    есть на каждой операции — замер показал 12 операций в секунду против
+    тысяч.
+
+    Доступ и так полностью сериализован глобальной блокировкой (единственный
+    писатель), поэтому одно переиспользуемое соединение и решает обе задачи.
+    check_same_thread выключен осознанно: за очерёдность отвечает _lock.
     """
-    conn = sqlite3.connect(_DB_PATH, timeout=10)
+    global _conn
+    if _conn is None:
+        _conn = sqlite3.connect(_DB_PATH, timeout=10, check_same_thread=False)
+        _conn.execute("PRAGMA busy_timeout=5000")
+        # С WAL это безопасно и снимает fsync на каждой фиксации.
+        _conn.execute("PRAGMA synchronous=NORMAL")
     try:
-        conn.execute("PRAGMA busy_timeout=5000")
-        with conn:
-            yield conn
-    finally:
-        conn.close()
+        with _conn:
+            yield _conn
+    except sqlite3.Error:
+        # Соединение могло стать непригодным — пересоздадим на следующем вызове
+        try:
+            _conn.close()
+        except sqlite3.Error:
+            pass
+        _conn = None
+        raise
 
 
-def init() -> None:
+def init() -> bool:
+    """Подготовить БД. Возвращает False, если хранилище недоступно.
+
+    Ошибку НЕ поднимаем: раньше она летела наружу из импорта app и
+    воркер gunicorn вообще не поднимался — то есть недоступная или битая
+    база роняла весь сервис, хотя все остальные пути умеют деградировать.
+    """
+    try:
+        return _init_unsafe()
+    except Exception:
+        logging.exception("хранилище статистики недоступно")
+        return False
+
+
+def _init_unsafe() -> bool:
     config.DATA_DIR.mkdir(parents=True, exist_ok=True)
     with _lock, _connect() as conn:
         # WAL — персистентное свойство файла, задавать его на каждом
         # соединении не нужно.
         conn.execute("PRAGMA journal_mode=WAL")
         conn.executescript(_SCHEMA)
+    return True
+
+
+def round_existing_timestamps() -> int:
+    """Одноразово огрубить уже накопленные метки до минуты.
+
+    Округление новых записей не помогает тем, что уже лежат в базе, — а
+    именно они и раскрывали точный момент: при небольшом трафике запись с
+    count=1 публикует секунду единственного скачивания конкретным
+    человеком. Формат `...T00:00:00+00:00` остаётся лексикографически
+    сортируемым, поэтому порядок в ленте не страдает.
+    """
+    try:
+        with _lock, _connect() as conn:
+            n = 0
+            for table, cols in (("events", ("at",)),
+                                ("feed", ("first_seen", "last_seen"))):
+                for col in cols:
+                    cur = conn.execute(
+                        f"UPDATE {table} SET {col} = substr({col}, 1, 16) || ':00+00:00' "
+                        f"WHERE length({col}) > 22")
+                    n += cur.rowcount or 0
+            return n
+    except Exception:
+        logging.exception("не удалось огрубить метки времени")
+        return 0
 
 
 def bump(counter: str, amount: int = 1) -> None:
@@ -103,8 +180,48 @@ def record_download(url: str) -> None:
                 "ON CONFLICT(url) DO UPDATE SET "
                 "  last_seen = excluded.last_seen, count = count + 1",
                 (url, now, now))
+            # До минуты: см. пояснение в заголовке модуля.
+            conn.execute("INSERT INTO events(url, at) VALUES (?, ?)",
+                         (url, now[:16] + ":00+00:00"))
     except sqlite3.Error:
         pass
+
+
+def events_for(url: str, limit: int = 100) -> list[str]:
+    """Времена скачиваний одного ролика, от свежих к старым.
+
+    Возвращается не больше `limit` записей, поэтому вызывающая сторона не
+    должна выдавать недобор за «остальные не записаны».
+    """
+    if not config.FEED_ENABLED or not url:
+        return []
+    limit = max(1, min(int(limit), 500))
+    try:
+        with _lock, _connect() as conn:
+            rows = conn.execute(
+                "SELECT at FROM events WHERE url = ? ORDER BY at DESC LIMIT ?",
+                (url, limit)).fetchall()
+        return [r[0] for r in rows]
+    except sqlite3.Error:
+        return []
+
+
+def prune_events() -> int:
+    """Убрать события старше срока хранения.
+
+    Таблица растёт на строку с каждой загрузкой, поэтому ей нужен предел —
+    иначе она становится вечным журналом активности.
+    """
+    if config.EVENT_RETENTION_DAYS <= 0:
+        return 0
+    cutoff = (datetime.now(timezone.utc)
+              - timedelta(days=config.EVENT_RETENTION_DAYS)).isoformat()
+    try:
+        with _lock, _connect() as conn:
+            cur = conn.execute("DELETE FROM events WHERE at < ?", (cutoff,))
+            return cur.rowcount or 0
+    except sqlite3.Error:
+        return 0
 
 
 def selftest() -> None:
@@ -128,6 +245,10 @@ def migrate_feed(canonicalize) -> int:
         with _lock, _connect() as conn:
             rows = conn.execute(
                 "SELECT url, first_seen, last_seen, count FROM feed").fetchall()
+            # Любое исключение из canonicalize (а не только sqlite3.Error)
+            # раньше летело наружу из импорта app и не давало сервису
+            # стартовать: canonical_url ловит лишь ValueError, а на
+            # одиночном суррогате бросает UnicodeEncodeError.
             merged: dict[str, list] = {}
             changed = False
             for url, first, last, cnt in rows:
@@ -148,8 +269,16 @@ def migrate_feed(canonicalize) -> int:
                 "INSERT INTO feed(url, first_seen, last_seen, count) "
                 "VALUES (?, ?, ?, ?)",
                 [(u, v[0], v[1], v[2]) for u, v in merged.items()])
+            # События хранятся по тому же адресу: без переноса вся
+            # собранная история оставалась осиротевшей и невидимой.
+            for old_url in {r[0] for r in rows}:
+                new_url = canonicalize(old_url)
+                if new_url != old_url:
+                    conn.execute("UPDATE events SET url = ? WHERE url = ?",
+                                 (new_url, old_url))
             return len(rows) - len(merged)
-    except sqlite3.Error:
+    except Exception:
+        logging.exception("миграция ленты не удалась")
         return 0
 
 

@@ -87,10 +87,15 @@ def test_janitor_removes_stuck_task(manager, monkeypatch):
     """Задача в нетерминальном статусе не выселялась НИКОГДА: карточки
     копились до TASKS_MAX, и сервис отвечал вечным «перегружен»."""
     monkeypatch.setattr(config, "TASK_TTL_MINUTES", 1)
+    monkeypatch.setattr(config, "STUCK_TASK_SEC", 60)
     t = _task(manager, status="downloading", tid="e" * 32)
-    t.created_at = time.time() - 10_000      # заведомо дольше любого порога
+    t.created_at = time.time() - 10_000
     manager._janitor_pass()
-    assert manager.get(t.id).status == "error"
+    stuck = manager.get(t.id)
+    assert stuck.status == "error"
+    # Без флага отмены воркер продолжал работать и вечно занимал слот,
+    # а уборщик сносил файлы у него из-под рук.
+    assert stuck.cancel.is_set()
 
 
 def test_janitor_keeps_gitkeep(manager, monkeypatch):

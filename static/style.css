@@ -471,3 +471,26 @@ footer a{color:var(--text-secondary)}
 }
 
 .note em{font-style:normal; font-weight:600; color:var(--text-secondary)}
+
+/* Точное время в ленте — моноширинным, чтобы колонка не «плясала». */
+.meta__time{font-family:var(--font-mono); font-variant-numeric:tabular-nums; color:var(--text-secondary)}
+
+/* Времена отдельных скачиваний, раскрываются по клику на счётчик. */
+button.feed-count{
+  background:transparent; border:0; cursor:pointer; font:inherit;
+  border-radius:var(--r-sm); padding:4px 8px;
+  transition:background var(--dur-fast) var(--ease);
+}
+button.feed-count:hover{background:var(--surface-2)}
+button.feed-count:focus-visible{outline:none; box-shadow:var(--shadow-focus)}
+button.feed-count[aria-expanded="true"]{background:var(--accent-soft)}
+.feed-times{
+  grid-column:1 / -1; display:flex; flex-wrap:wrap; gap:6px;
+  padding:var(--s-3) 0 2px; border-top:1px solid var(--border); margin-top:var(--s-3);
+}
+.feed-time{
+  font:500 12px/1 var(--font-mono); font-variant-numeric:tabular-nums;
+  color:var(--text-secondary); background:var(--surface-2);
+  padding:5px 8px; border-radius:var(--r-xs);
+}
+.feed-time--note{background:transparent; color:var(--text-muted); font-family:var(--font-sans)}

@@ -33,6 +33,9 @@ if config.QUIET_ACCESS_LOG:
 
 manager = dl.DownloadManager()
 stats.init()
+_rounded = stats.round_existing_timestamps()
+if _rounded:
+    logging.info("метки времени огрублены до минуты: %d", _rounded)
 _merged = stats.migrate_feed(dl.canonical_url)
 if _merged:
     logging.info("лента: схлопнуто дубликатов ссылок — %d", _merged)
@@ -50,6 +53,25 @@ def _task_finished(task) -> None:
 
 
 manager.on_complete = _task_finished
+
+
+def _prune_events_loop() -> None:
+    """Раз в сутки убирать устаревшие события: таблица растёт на строку с
+    каждой загрузкой и без этого станет вечным журналом активности."""
+    while True:
+        try:
+            removed = stats.prune_events()
+            if removed:
+                logging.info("события: удалено устаревших — %d", removed)
+        except Exception:
+            logging.exception("не удалось почистить события")
+        # Спим ПОСЛЕ работы: при сне в начале сервис, перезапускаемый чаще
+        # раза в сутки, не чистил события никогда, и обещанные «90 дней»
+        # были неправдой.
+        time.sleep(24 * 3600)
+
+
+threading.Thread(target=_prune_events_loop, daemon=True).start()
 
 # --- простой in-memory rate limit по IP ---
 _hits: dict[str, deque] = defaultdict(deque)
@@ -351,6 +373,21 @@ def api_stats():
     return _cacheable(jsonify(stats.summary()), 15)
 
 
+@app.get("/api/feed/events")
+def api_feed_events():
+    """Времена отдельных скачиваний одного ролика."""
+    if not rate_ok("info", config.RATE_MAX_INFO):
+        return err("Слишком много запросов, подождите немного", 429)
+    url = request.args.get("url", "")
+    if not url:
+        return err("Не указана ссылка")
+    return _cacheable(jsonify({
+        "url": url,
+        "times": stats.events_for(dl.canonical_url(url)),
+        "retention_days": config.EVENT_RETENTION_DAYS,
+    }), 15)
+
+
 @app.get("/api/feed")
 def api_feed():
     order = "popular" if request.args.get("order") == "popular" else "recent"
@@ -361,6 +398,7 @@ def api_feed():
     return _cacheable(jsonify({
         "items": stats.feed(order=order, limit=config.FEED_PAGE_SIZE, offset=offset),
         "totals": stats.feed_totals(),
+        "page_size": config.FEED_PAGE_SIZE,
     }), 15)
 
 
@@ -374,6 +412,7 @@ def stats_page():
         "feed": {
             "items": stats.feed(order="recent", limit=config.FEED_PAGE_SIZE),
             "totals": stats.feed_totals(),
+            "page_size": config.FEED_PAGE_SIZE,
         },
     })
 

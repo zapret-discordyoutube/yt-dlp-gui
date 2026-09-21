@@ -127,10 +127,11 @@
   <section class="section">
     <div class="note">
       <span aria-hidden="true">🔒</span>
-      <span>О ленте выше: сервер хранит <strong>только адрес ролика, дату и счётчик</strong> — ни
-      названий, ни обложек, ни размеров, ни того, кто скачивал. Названия и картинки ваш браузер
-      забирает напрямую с YouTube, сервер их не видит и не хранит.
-      Сами видеофайлы не сохраняются: они удаляются сразу после выдачи.
+      <span>О ленте выше: сервер хранит <strong>адрес ролика и время каждого скачивания</strong>
+      — и больше ничего. Ни названий, ни обложек, ни размеров, ни того, кто скачивал: ни IP,
+      ни сессии, ни учётных записей. Названия и картинки ваш браузер забирает напрямую с
+      YouTube, сервер их не видит и не хранит. Сами видеофайлы не сохраняются — удаляются
+      вскоре после выдачи. Времена скачиваний хранятся 90 дней, затем стираются.
       <span id="since-note"></span></span>
     </div>
   </section>
@@ -224,10 +225,8 @@ async function load(force) {
   if (!force && cache.fresh()) return;
   try {
     const r = await fetch("/api/stats");
-    if (!r.ok) throw new Error(r.status === 429
-      ? "Слишком много запросов — подождите немного"
-      : `Сервер ответил ${r.status}`);
-    DATA = await r.json();
+    if (!r.ok) throw new Error(httpMessage(r.status));
+    DATA = await readJson(r);
     cache.write({ stats: DATA });
   } catch (e) {
     // Показываем ошибку, только если показывать вообще нечего.
@@ -312,6 +311,21 @@ document.querySelectorAll("#metric-seg button").forEach(b =>
   }));
 
 /* ---------- Лента «что скачивают» ---------- */
+
+/* nginx отдаёт свои ошибки HTML-страницей, поэтому разбор JSON падал
+   сырым английским исключением прямо в интерфейс. */
+const httpMessage = (code) => ({
+  429: "Слишком много запросов — подождите немного",
+  502: "Сервис недоступен, попробуйте позже",
+  503: "Сервис перегружен, попробуйте позже",
+  504: "Сервер не ответил вовремя",
+}[code] || `Сервер ответил ${code}`);
+
+async function readJson(r) {
+  try { return await r.json(); }
+  catch { throw new Error("Сервер вернул неожиданный ответ"); }
+}
+
 const esc = (s) => String(s ?? "").replace(/[&<>"']/g, c =>
   ({ "&":"&amp;","<":"&lt;",">":"&gt;",'"':"&quot;","'":"&#39;" }[c]));
 
@@ -355,43 +369,75 @@ async function fetchTitle(url) {
   }
 }
 
-const FEED_PAGE = 50;
+const FEED_PAGE = (INITIAL.feed && INITIAL.feed.page_size) || 50;
 let feedOrder = "recent", feedOffset = 0;
 
 const relTime = (iso) => {
-  const d = new Date(iso), diff = (Date.now() - d) / 1000;
+  const d = new Date(iso);
+  if (isNaN(d)) return "";                 // пустая или битая метка
+  const diff = (Date.now() - d) / 1000;
   if (diff < 60) return "только что";
-  if (diff < 3600) return `${Math.floor(diff / 60)} мин назад`;
-  if (diff < 86400) return `${Math.floor(diff / 3600)} ч назад`;
-  if (diff < 2592000) return `${Math.floor(diff / 86400)} дн назад`;
+  if (diff < 3600) {
+    const m = Math.floor(diff / 60);
+    return `${m} ${plural(m, "минуту", "минуты", "минут")} назад`;
+  }
+  if (diff < 86400) {
+    const h = Math.floor(diff / 3600);
+    return `${h} ${plural(h, "час", "часа", "часов")} назад`;
+  }
+  const dd = Math.floor(diff / 86400);
+  if (diff < 2592000) return `${dd} ${plural(dd, "день", "дня", "дней")} назад`;
   return d.toLocaleDateString("ru-RU", { day: "numeric", month: "short", year: "numeric" });
 };
 
-let feedLoading = false;
+/* Точное время: в ленте видно, когда именно скачивали, а не только
+   «сколько назад». Сегодняшнее показываем часами, остальное — с датой. */
+const exactTime = (iso) => {
+  const d = new Date(iso);
+  if (isNaN(d)) return "";
+  const today = new Date().toDateString() === d.toDateString();
+  return d.toLocaleString("ru-RU", today
+    ? { hour: "2-digit", minute: "2-digit" }
+    : { day: "2-digit", month: "2-digit", hour: "2-digit", minute: "2-digit" });
+};
+
+/* Полная метка для подсказки при наведении. */
+const fullTime = (iso) => {
+  const d = new Date(iso);
+  return isNaN(d) ? "" : d.toLocaleString("ru-RU", {
+    day: "2-digit", month: "long", year: "numeric",
+    hour: "2-digit", minute: "2-digit", second: "2-digit" });
+};
+
+let feedGen = 0;
 
 async function loadFeed(reset) {
-  // Без этого два быстрых клика по «Показать ещё» уходили с одинаковым
-  // смещением: страница дублировалась, а следующая пропускалась навсегда.
-  if (feedLoading) return;
-  feedLoading = true;
+  // Простая блокировка «уже гружу» отбрасывала смену сортировки: кнопка
+  // выглядела нажатой, а лента оставалась прежней и дальше дописывала
+  // популярные к недавним. Считаем поколения — побеждает последний
+  // запрос, устаревший ответ отбрасывается.
+  const gen = ++feedGen;
+  const more = $("#feed-more");
+  more.disabled = true;                 // защита от двойного клика
   try {
-    await _loadFeed(reset);
+    await _loadFeed(reset, gen);
   } finally {
-    feedLoading = false;
+    if (gen === feedGen) more.disabled = false;
   }
 }
 
-async function _loadFeed(reset) {
+async function _loadFeed(reset, gen) {
   if (reset) { feedOffset = 0; $("#feed").innerHTML = ""; }
+  const order = feedOrder, offset = feedOffset;
   let d;
   try {
-    const r = await fetch(`/api/feed?order=${feedOrder}&offset=${feedOffset}`);
-    if (!r.ok) throw new Error(r.status === 429
-      ? "Слишком много запросов — подождите немного"
-      : `Сервер ответил ${r.status}`);
-    d = await r.json();
-    if (feedOrder === "recent" && feedOffset === 0) cache.write({ feed: d });
+    const r = await fetch(`/api/feed?order=${order}&offset=${offset}`);
+    if (!r.ok) throw new Error(httpMessage(r.status));
+    d = await readJson(r);
+    if (gen !== feedGen) return;        // ответ на устаревший запрос
+    if (order === "recent" && offset === 0) cache.write({ feed: d });
   } catch (e) {
+    if (gen !== feedGen) return;
     // Есть что показать из кэша — показываем его, а не ошибку.
     const c = cache.read();
     if (reset && feedOrder === "recent" && c && c.feed) {
@@ -436,12 +482,52 @@ function applyFeed(d) {
       <div class="feed-body">
         <a class="feed-title" href="${esc(url)}" target="_blank"
            rel="noopener noreferrer nofollow">${esc(url)}</a>
-        <div class="meta">${esc(host)} · ${esc(relTime(it.last_seen))}</div>
+        <div class="meta" title="Последний раз: ${esc(fullTime(it.last_seen))}&#10;Впервые: ${esc(fullTime(it.first_seen))}">${esc(host)}${
+          exactTime(it.last_seen) ? ` · <span class="meta__time">${esc(exactTime(it.last_seen))}</span>` : ""
+        }${relTime(it.last_seen) ? ` · ${esc(relTime(it.last_seen))}` : ""}</div>
       </div>
-      <div class="feed-count" title="Скачивали ${esc(it.count)} раз(а)">
+      <button class="feed-count" type="button" data-times="${esc(url)}"
+              aria-expanded="false" title="Показать время каждого скачивания">
         <strong>${fmtNum(it.count)}</strong><span>раз</span>
-      </div>`;
+      </button>
+      <div class="feed-times hidden" hidden></div>`;
     $("#feed").appendChild(el);
+
+    // по клику на счётчик показываем время каждого скачивания
+    el.querySelector("[data-times]").addEventListener("click", async (e) => {
+      const btn = e.currentTarget;
+      const box = el.querySelector(".feed-times");
+      const open = btn.getAttribute("aria-expanded") === "true";
+      if (open) {
+        btn.setAttribute("aria-expanded", "false");
+        box.hidden = true; box.classList.add("hidden");
+        return;
+      }
+      btn.setAttribute("aria-expanded", "true");
+      box.hidden = false; box.classList.remove("hidden");
+      if (box.dataset.loaded) return;
+      box.textContent = "Загружаем…";
+      try {
+        const r = await fetch("/api/feed/events?url=" + encodeURIComponent(url));
+        if (!r.ok) throw new Error(`Сервер ответил ${r.status}`);
+        const d = await r.json();
+        const times = d.times || [];
+        if (!times.length) {
+          box.textContent = "Времена не записаны: их начали сохранять недавно.";
+        } else {
+          box.innerHTML = times.map(t =>
+            `<span class="feed-time">${esc(fullTime(t))}</span>`).join("");
+          if (times.length < it.count) {
+            box.innerHTML += `<span class="feed-time feed-time--note">` +
+              `…и ещё ${fmtNum(it.count - times.length)} до начала записи ` +
+              `(хранится ${d.retention_days} дней)</span>`;
+          }
+        }
+        box.dataset.loaded = "1";
+      } catch (err) {
+        box.textContent = "Не удалось загрузить: " + err.message;
+      }
+    });
 
     // название подтягиваем с YouTube — наш сервер его не хранит
     if (vid) {

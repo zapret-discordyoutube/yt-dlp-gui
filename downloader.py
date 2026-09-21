@@ -103,14 +103,22 @@ def build_format(kind: str, height: str = "auto", acodec: str = "best",
             raise ValueError("unknown_height")
 
         v = f"bestvideo{hfilter}{vfilter}"
-        # Каскад запасных вариантов: сначала точный кодек и звук, затем
-        # послабления, чтобы выбор редкого сочетания не приводил к отказу.
+        # Каскад запасных вариантов: от точного совпадения к послаблениям.
+        # Важны две ступени, которых не хватало:
+        #  * «снять фильтр кодека, но оставить склейку» — без неё на сайтах
+        #    с раздельными дорожками (DASH/HLS, YouTube выше 1080p) выбор
+        #    проваливался мимо склейки к муксованному 360p, и пользователь
+        #    молча получал не то, что заказывал, с верной подписью;
+        #  * замыкающий вариант обязан уважать ограничение высоты: прежний
+        #    голый `best` отдавал 1080p на запрос 360p, то есть кратно
+        #    больше трафика и диска, чем просили.
         sel = "/".join(filter(None, [
             f"{v}+bestaudio{afilter}" if afilter else None,
             f"{v}+bestaudio",
+            f"bestvideo{hfilter}+bestaudio" if vfilter else None,
             f"best{hfilter}{vfilter}" if vfilter else None,
             f"best{hfilter}",
-            "best",
+            "worst" if hfilter else "best",
         ]))
         label = " · ".join([hlabel, vlabel] + ([alabel] if vaudio != "auto" else []))
         return sel, {"merge_output_format": container}, label
@@ -122,7 +130,8 @@ _MERGE_CONTAINERS = {"mp4", "webm", "mkv", "mov"}
 
 # Разрешаем произвольный выбор формата, но только как ID (и связку через '+').
 # Запрещены скобки, фильтры, '/', пробелы — то есть синтаксис селекторов yt-dlp.
-_FORMAT_ID_RE = re.compile(r"^[A-Za-z0-9_\-.]{1,48}(\+[A-Za-z0-9_\-.]{1,48})?$")
+_FORMAT_ID_RE = re.compile(
+    r"^[A-Za-z0-9_\-.=:@~]{1,64}(\+[A-Za-z0-9_\-.=:@~]{1,64})?$")
 
 # Регулярка выше пропускала не только идентификаторы, но и КЛЮЧЕВЫЕ СЛОВА
 # селектора: 'all' и 'mergeall' заставляли yt-dlp скачать все дорожки сразу,
@@ -352,6 +361,7 @@ class Task:
     error: str | None = None
     created_at: float = field(default_factory=time.time)
     served_at: float | None = None      # когда пользователь забрал файл
+    completed: bool = False             # on_complete уже вызывали
     cancel: threading.Event = field(default_factory=threading.Event)
 
     def public(self) -> dict:
@@ -467,19 +477,35 @@ class DownloadManager:
                     pass
         # снять старые карточки задач (только в памяти)
         tcut = now - config.TASK_TTL_MINUTES * 60
+        stuck: list[Task] = []
         with self.lock:
             for t in list(self.tasks.values()):
                 if t.created_at >= tcut:
                     continue
                 if t.status in ("finished", "error", "cancelled", "served"):
                     self.tasks.pop(t.id, None)
-                elif t.created_at < now - config.TASK_TTL_MINUTES * 120:
+                elif t.created_at < now - config.STUCK_TASK_SEC:
                     # Зависшая задача (умер воркер, встал постпроцессинг)
                     # раньше не выселялась НИКОГДА: карточки копились до
                     # TASKS_MAX, и сервис отвечал вечным «перегружен».
+                    was = t.status
+                    # Флаг отмены обязателен: без него воркер продолжал
+                    # работать, вечно занимал слот из трёх, а уборщик на
+                    # следующем проходе сносил файлы у него из-под рук —
+                    # и по завершении ссылка всё равно уходила в ленту.
+                    t.cancel.set()
                     t.error = "Задача не завершилась и была снята"
                     t.status = "error"
-                    logging.warning("снята зависшая задача в статусе %s", t.status)
+                    stuck.append(t)
+                    logging.warning("снята зависшая задача, была в статусе %s", was)
+
+        # on_complete зовём ВНЕ блокировки: он ходит в БД.
+        for t in stuck:
+            if self.on_complete:
+                try:
+                    self.on_complete(t)
+                except Exception:
+                    logging.exception("не удалось учесть снятую задачу")
 
     def _start_janitor(self) -> None:
         def loop():
@@ -605,7 +631,11 @@ class DownloadManager:
         return False
 
     def _make_hook(self, task: Task):
-        last_check = [0.0]
+        last_disk_check = [0.0]
+        # Байты по каждому файлу отдельно: на связке video+audio yt-dlp
+        # начинает счёт заново для второй дорожки, и проверка «по текущему
+        # файлу» пропускала суммарно до двух потолков на диск.
+        per_file: dict[str, int] = {}
 
         def hook(d):
             if task.cancel.is_set():
@@ -616,14 +646,19 @@ class DownloadManager:
             # не работает для HLS/DASH и chunked-ответов: такой поток качался
             # бы без ограничения размера. А хост — гипервизор, заполнить его
             # раздел нельзя.
+            name = d.get("filename") or "?"
+            per_file[name] = d.get("downloaded_bytes") or 0
+            # Размер проверяем на КАЖДОМ вызове: он почти бесплатен, а по
+            # таймеру быстрая загрузка успевала закончиться между замерами
+            # и не проверялась вовсе.
+            if sum(per_file.values()) > config.MAX_FILESIZE_MB * 1048576:
+                task.error = "Файл превышает допустимый размер"
+                task.cancel.set()
+                raise yt_dlp.utils.DownloadCancelled()
+
             now = time.time()
-            if now - last_check[0] > 5:
-                last_check[0] = now
-                got = d.get("downloaded_bytes") or 0
-                if got > config.MAX_FILESIZE_MB * 1048576:
-                    task.error = "Файл превышает допустимый размер"
-                    task.cancel.set()
-                    raise yt_dlp.utils.DownloadCancelled()
+            if now - last_disk_check[0] > 5:      # обращение к ФС — реже
+                last_disk_check[0] = now
                 try:
                     free_mb = shutil.disk_usage(config.DOWNLOAD_DIR).free / 1048576
                 except OSError:
@@ -689,8 +724,15 @@ class DownloadManager:
                     for pp in task.extra.get("postprocessors") or []:
                         if pp.get("key") == "FFmpegExtractAudio":
                             pref = pp.get("preferredcodec")
-                            ext = {"aac": "m4a"}.get(pref, pref)
-                            final = os.path.splitext(final)[0] + f".{ext}"
+                            if pref in (None, "best"):
+                                # «Оригинал» не меняет расширение — угадать
+                                # его нельзя, ищем файл задачи на диске.
+                                found = sorted(
+                                    config.DOWNLOAD_DIR.glob(f"{task.id}.*"))
+                                final = str(found[0]) if found else final
+                            else:
+                                ext = {"aac": "m4a"}.get(pref, pref)
+                                final = os.path.splitext(final)[0] + f".{ext}"
                             break
             if task.cancel.is_set():
                 task.status = "cancelled"
@@ -711,14 +753,15 @@ class DownloadManager:
                 task.percent = 100
                 task.status = "finished"
             else:
-                task.status = "error"
                 task.error = "Файл не найден после скачивания"
+                task.status = "error"
         except yt_dlp.utils.DownloadCancelled:
             # Сторож мог прервать загрузку по размеру или нехватке места —
             # тогда это ошибка с причиной, а не тихая отмена пользователем.
             task.status = "error" if task.error else "cancelled"
             self._cleanup_partials(task)
-        except yt_dlp.utils.DownloadError as e:
+        except (yt_dlp.utils.DownloadError,
+                yt_dlp.utils.UnavailableVideoError) as e:
             # осмысленное сообщение самого yt-dlp — показываем очищенным
             # Текст ПЕРЕД статусом: клиент закрывает поток по терминальному
             # статусу и успевал прочитать «Ошибка: » без причины.
@@ -732,6 +775,14 @@ class DownloadManager:
             task.status = "error"
             logging.exception("внутренний сбой задачи (%s)", _host_of(task.url))
         finally:
+            task.completed = True
+            # Уборка на ВСЕХ путях выхода. Раньше она была только в ветке
+            # отмены, а самый частый исход в проде — сетевой сбой, 403 или
+            # падение ffmpeg — оставлял до двух потолков размера мусора на
+            # FILE_TTL. Он считается в квоте, и сервис начинал отвечать
+            # «нет места» здоровым пользователям.
+            if task.status != "finished":
+                self._cleanup_partials(task)
             if self.on_complete:
                 try:
                     self.on_complete(task)

@@ -28,9 +28,13 @@ def test_video_selector_exact():
         "bestvideo[height<=?1080][vcodec~='(?i:^(avc1|h264))']"
         "+bestaudio[acodec~='(?i:^mp4a)']"
         "/bestvideo[height<=?1080][vcodec~='(?i:^(avc1|h264))']+bestaudio"
+        # ступень без фильтра кодека: без неё на сайтах с раздельными
+        # дорожками выбор проваливался мимо склейки к муксованному 360p
+        "/bestvideo[height<=?1080]+bestaudio"
         "/best[height<=?1080][vcodec~='(?i:^(avc1|h264))']"
         "/best[height<=?1080]"
-        "/best"
+        # замыкающий вариант обязан уважать ограничение высоты
+        "/worst"
     )
     assert extra["merge_output_format"] == "mp4"
     assert label == "1080p · H.264 · AAC"
@@ -113,7 +117,12 @@ def test_build_format_rejects_unknown(kwargs, code):
 
 # --- выбор формата по идентификатору ---------------------------------------
 
-@pytest.mark.parametrize("fid", ["137", "137+140", "hls-480", "616", "mp4-low"])
+@pytest.mark.parametrize("fid", [
+    "137", "137+140", "hls-480", "616", "mp4-low",
+    # DASH отдаёт Representation@id как есть: '=', ':', '@', '~' в нём
+    # встречаются, и прежняя регулярка ломала продвинутый режим целиком
+    "video=1500000", "audio=128000", "video=1500000+audio=128000",
+])
 def test_format_id_accepts_real_ids(fid):
     sel, _, _ = dl.build_from_format_id(fid)
     assert sel == fid
@@ -121,7 +130,8 @@ def test_format_id_accepts_real_ids(fid):
 
 @pytest.mark.parametrize("fid", [
     "bestvideo[height<=1080]",   # синтаксис селектора
-    "a/b", "137 140", "$(id)", "../x", "137+140+141", "", "a" * 60,
+    "a/b", "137 140", "$(id)", "../x", "137+140+141", "",
+    "a" * 70,                                                 # длиннее предела
     "all", "mergeall", "best", "worst", "bv", "ba", "BEST",   # ключевые слова
     "all+140", "137+all",
 ])

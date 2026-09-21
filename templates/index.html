@@ -170,8 +170,9 @@
       <span><strong>Что мы храним, а что нет.</strong>
       <em>Не храним:</em> сами видеофайлы (удаляются сразу после выдачи), ваш IP, ваши личные настройки
       и вашу историю — она лежит только в этом браузере и на сервер не уходит.
-      <em>Храним:</em> адрес скачанного ролика, дату и счётчик — это попадает в публичную
-      <a href="/stats">ленту «что скачивают»</a>. Без привязки к тому, кто именно скачивал.
+      <em>Храним:</em> адрес скачанного ролика и время каждого скачивания — это попадает в
+      публичную <a href="/stats">ленту «что скачивают»</a> и стирается через 90 дней.
+      Без привязки к тому, кто именно скачивал.
       Названия и обложки в ленте ваш браузер берёт напрямую с YouTube — у нас их нет.</span>
     </div>
   </section>
@@ -250,6 +251,21 @@ const fmtDur = (s) => {
 const esc = (s) => String(s ?? "").replace(/[&<>"']/g, c =>
   ({ "&":"&amp;","<":"&lt;",">":"&gt;",'"':"&quot;","'":"&#39;" }[c]));
 
+
+/* nginx отдаёт свои ошибки HTML-страницей, поэтому разбор JSON падал
+   сырым английским исключением прямо в интерфейс. */
+const httpMessage = (code) => ({
+  429: "Слишком много запросов — подождите немного",
+  502: "Сервис недоступен, попробуйте позже",
+  503: "Сервис перегружен, попробуйте позже",
+  504: "Сервер не ответил вовремя",
+}[code] || `Сервер ответил ${code}`);
+
+async function readJson(r) {
+  try { return await r.json(); }
+  catch { throw new Error("Сервер вернул неожиданный ответ"); }
+}
+
 /* Ссылки из истории попадают в href. История лежит в localStorage и могла
    быть испорчена, поэтому пропускаем только http(s) — как и на /stats. */
 const safeUrl = (u) => {
@@ -290,8 +306,8 @@ $("#url-form").addEventListener("submit", async (e) => {
       headers: { "Content-Type": "application/json" },
       body: JSON.stringify({ url })
     });
-    const data = await r.json();
-    if (!r.ok) throw new Error(data.error || "Не удалось получить информацию");
+    const data = await readJson(r).catch(() => ({}));
+    if (!r.ok) throw new Error(data.error || httpMessage(r.status));
     current = data;
     renderPreview(data);
   } catch (err) {
@@ -397,7 +413,7 @@ $("#download-btn").addEventListener("click", async () => {
   const body = { url: current.webpage_url, title: current.title, thumbnail: current.thumbnail };
   if (settings.mode === "all") {
     const picked = document.querySelector('input[name="fmt"]:checked');
-    if (!picked) { toast("Выберите формат", "error"); return; }
+    if (!picked) { toast("Выберите формат", "error"); restore(); return; }
     body.format_id = picked.value;
   } else if (settings.mode === "audio") {
     body.kind = "audio"; body.acodec = settings.acodec;
@@ -411,8 +427,8 @@ $("#download-btn").addEventListener("click", async () => {
       method: "POST", headers: { "Content-Type": "application/json" },
       body: JSON.stringify(body)
     });
-    const task = await r.json();
-    if (!r.ok) throw new Error(task.error || "Не удалось запустить загрузку");
+    const task = await readJson(r).catch(() => ({}));
+    if (!r.ok) throw new Error(task.error || httpMessage(r.status));
     addTask(task);
     watchTask(task.id);
     toast("Загрузка началась");
@@ -455,7 +471,7 @@ function watchTask(id) {
   es.onmessage = (ev) => {
     retries = 0;          // поток снова живой — счётчик неудач обнуляем
     let t; try { t = JSON.parse(ev.data); } catch { return; }
-    if (t.status === "gone") { es.close(); return; }
+    if (t.status === "gone") { es.close(); markLost(id, "Задача не найдена — возможно, сервер перезапускался"); return; }
     renderTask(t);
     if (["finished","error","cancelled"].includes(t.status)) {
       es.close();
@@ -473,16 +489,31 @@ function watchTask(id) {
     // переподключается сам — это не ошибка. Сдаёмся, только если
     // соединение закрыто окончательно и попытки подряд не помогли.
     if (es.readyState !== EventSource.CLOSED) return;
-    if (++retries > 5) {
+    // В состоянии CLOSED браузер уже не переподключается сам, поэтому
+    // второго шанса не будет: сообщаем сразу, а не после порога попыток.
+    // Раньше счётчик доходил до единицы и карточка замирала навсегда.
+    if (!el_hasResult(id) && ++retries >= 1) {
       es.close();
-      const el = document.getElementById("task-" + id);
-      const status = el?.querySelector(`[data-status="${id}"]`);
-      if (status && !el.querySelector(".btn--success")) {
-        status.textContent = "Связь с сервером потеряна — запустите загрузку заново";
-        el.querySelector(".progress").dataset.state = "error";
-      }
+      markLost(id, "Связь с сервером потеряна — запустите загрузку заново");
     }
   };
+}
+
+/* У карточки уже есть результат (кнопка сохранения)? Тогда обрыв потока
+   ничего не меняет и пугать пользователя не нужно. */
+function el_hasResult(id) {
+  const el = document.getElementById("task-" + id);
+  return !!el?.querySelector(".btn--success");
+}
+
+function markLost(id, text) {
+  const el = document.getElementById("task-" + id);
+  if (!el || el.querySelector(".btn--success")) return;
+  const status = el.querySelector(`[data-status="${id}"]`);
+  if (status) status.textContent = text;
+  const bar = el.querySelector(".progress");
+  if (bar) { bar.dataset.state = "error"; bar.removeAttribute("aria-valuenow"); }
+  el.querySelector("[data-cancel]")?.remove();
 }
 
 function renderTask(t) {

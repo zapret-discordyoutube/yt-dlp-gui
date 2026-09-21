@@ -77,3 +77,11 @@ SSE_MAX_SECONDS = int(os.environ.get("YTG_SSE_MAX_SECONDS", "900"))
 # их подтягивает браузер напрямую с источника.
 FEED_ENABLED = os.environ.get("YTG_FEED_ENABLED", "1") == "1"
 FEED_PAGE_SIZE = int(os.environ.get("YTG_FEED_PAGE_SIZE", "50"))
+# Сколько хранить времена отдельных скачиваний. Таблица растёт на строку с
+# каждой загрузкой, и без предела превращается в вечный журнал активности.
+EVENT_RETENTION_DAYS = int(os.environ.get("YTG_EVENT_RETENTION_DAYS", "90"))
+
+# Через сколько считать задачу зависшей и снимать её. Отдельная настройка,
+# а не множитель от TASK_TTL: прежняя запись `TASK_TTL_MINUTES * 120`
+# читалась как путаница минут с секундами, хотя означала «два TTL».
+STUCK_TASK_SEC = int(os.environ.get("YTG_STUCK_TASK_SEC", str(8 * 3600)))
