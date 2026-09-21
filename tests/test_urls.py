@@ -99,10 +99,29 @@ def test_canonical_url_strips_secrets():
 
 def test_canonical_url_is_stable():
     """Порядок параметров и регистр хоста не должны плодить дубликаты."""
-    a = dl.canonical_url("https://Example.com/p?b=2&a=1#frag")
+    a = dl.canonical_url("https://Example.com/p?b=2&a=1")
     b = dl.canonical_url("https://example.com/p/?a=1&b=2")
     assert a == b
-    assert "#" not in a
+
+
+def test_canonical_url_keeps_what_identifies_resource():
+    """Порт, схема и якорь отличают один ресурс от другого.
+
+    Раньше все три отбрасывались: ролики с разных портов схлопывались в
+    одну запись ленты, http-only сайт получал нерабочую https-ссылку, а
+    одностраничные приложения, где идентификатор живёт в якоре, сливались
+    все вместе.
+    """
+    assert dl.canonical_url("https://e.com:8443/v/1") != \
+           dl.canonical_url("https://e.com:9090/v/1")
+    assert dl.canonical_url("http://e.com/v/1").startswith("http://")
+    assert dl.canonical_url("https://s.com/#/video/111") != \
+           dl.canonical_url("https://s.com/#/video/222")
+
+
+def test_canonical_url_brackets_ipv6():
+    out = dl.canonical_url("http://[2001:db8::1]:8080/v")
+    assert out == "http://[2001:db8::1]:8080/v"
 
 
 def test_canonical_url_survives_garbage():

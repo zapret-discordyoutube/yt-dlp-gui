@@ -538,3 +538,26 @@ footer p{margin:0 0 6px}
   .topnav a{padding:8px 6px}
   .icon-btn{width:32px}
 }
+.topnav__gh{display:inline-flex; align-items:center; gap:6px; white-space:nowrap}
+.topnav__gh svg{flex:none}
+@media (max-width:640px){
+  .topnav__gh span{position:absolute; width:1px; height:1px; overflow:hidden;
+    clip:rect(0,0,0,0); white-space:nowrap}
+  .topnav__gh{padding:8px 5px}
+}
+
+/* Совсем узкие экраны: пять пунктов в шапке не помещались в 320px. */
+@media (max-width:360px){
+  .topnav{gap:0}
+  .topnav a{padding:8px 4px}
+  .brand{font-size:13px; gap:8px}
+  .brand__mark{width:26px; height:26px; font-size:14px}
+}
+
+/* Заголовок секции и переключатель рядом с ним не помещались в одну
+   строку на узком экране и распирали страницу. */
+@media (max-width:640px){
+  .section__head{flex-wrap:wrap; gap:var(--s-3)}
+  .section__head .seg{max-width:100%; overflow-x:auto; scrollbar-width:none}
+  .section__head .seg::-webkit-scrollbar{display:none}
+}

@@ -100,12 +100,55 @@ def test_feed_limit_is_clamped():
     assert len(stats.feed(limit=0)) == 1           # приводится к минимуму
 
 
-def test_feed_pagination():
+def test_feed_pagination_by_cursor():
     for i in range(5):
         stats.record_download(f"https://x.example/{i}")
-    page1 = stats.feed(limit=2, offset=0)
-    page2 = stats.feed(limit=2, offset=2)
+    page1 = stats.feed(limit=2)
+    cur = stats.encode_cursor(page1[-1], "recent")
+    page2 = stats.feed(limit=2, cursor=cur)
+    assert len(page1) == 2 and len(page2) == 2
     assert {i["url"] for i in page1} & {i["url"] for i in page2} == set()
+
+
+def test_pagination_survives_changes_between_pages():
+    """Ровно тот случай, из-за которого отказались от OFFSET.
+
+    last_seen меняется при каждом скачивании, поэтому запись, обновлённая
+    между запросами страниц, сдвигала выборку: одни записи попадали на две
+    страницы, другие не попадали ни на одну.
+    """
+    for i in range(6):
+        stats.record_download(f"https://y.example/{i}")
+
+    page1 = stats.feed(limit=3)
+    cur = stats.encode_cursor(page1[-1], "recent")
+    # кто-то скачал самый старый ролик — он прыгает в начало ленты
+    stats.record_download("https://y.example/0")
+    page2 = stats.feed(limit=3, cursor=cur)
+
+    seen = [i["url"] for i in page1] + [i["url"] for i in page2]
+    assert len(seen) == len(set(seen)), f"запись попала на две страницы: {seen}"
+    # обновлённая запись уехала вверх и на второй странице её быть не должно
+    assert "https://y.example/0" not in {i["url"] for i in page2}
+
+
+def test_popular_cursor_walks_whole_feed():
+    for i in range(5):
+        for _ in range(5 - i):            # разные счётчики
+            stats.record_download(f"https://z.example/{i}")
+    seen, cursor = [], None
+    for _ in range(10):                   # с запасом
+        page = stats.feed(order="popular", limit=2, cursor=cursor)
+        if not page:
+            break
+        seen += [i["url"] for i in page]
+        cursor = stats.encode_cursor(page[-1], "popular")
+    assert len(seen) == len(set(seen)) == 5
+
+
+def test_bad_cursor_is_ignored():
+    stats.record_download("https://q.example/1")
+    assert stats.feed(cursor="не-курсор") == stats.feed()
 
 
 def test_record_download_ignores_empty():

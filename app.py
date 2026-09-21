@@ -33,12 +33,10 @@ if config.QUIET_ACCESS_LOG:
 
 manager = dl.DownloadManager()
 stats.init()
-_rounded = stats.round_existing_timestamps()
-if _rounded:
-    logging.info("метки времени огрублены до минуты: %d", _rounded)
-_merged = stats.migrate_feed(dl.canonical_url)
-if _merged:
-    logging.info("лента: схлопнуто дубликатов ссылок — %d", _merged)
+_mig = stats.run_migrations(dl.canonical_url)
+if not _mig.get("skipped"):
+    logging.info("разовые миграции выполнены: огрублено меток %d, "
+                 "схлопнуто дубликатов %d", _mig["rounded"], _mig["merged"])
 
 
 def _task_finished(task) -> None:
@@ -61,8 +59,10 @@ def _prune_events_loop() -> None:
     while True:
         try:
             removed = stats.prune_events()
-            if removed:
-                logging.info("события: удалено устаревших — %d", removed)
+            gone_feed, gone_daily = stats.prune_feed_and_daily()
+            if removed or gone_feed or gone_daily:
+                logging.info("очистка: событий %d, записей ленты %d, суток %d",
+                             removed, gone_feed, gone_daily)
         except Exception:
             logging.exception("не удалось почистить события")
         # Спим ПОСЛЕ работы: при сне в начале сервис, перезапускаемый чаще
@@ -391,14 +391,17 @@ def api_feed_events():
 @app.get("/api/feed")
 def api_feed():
     order = "popular" if request.args.get("order") == "popular" else "recent"
-    try:
-        offset = max(0, int(request.args.get("offset", 0)))
-    except ValueError:
-        offset = 0
+    cursor = request.args.get("cursor") or None
+    items = stats.feed(order=order, limit=config.FEED_PAGE_SIZE, cursor=cursor)
     return _cacheable(jsonify({
-        "items": stats.feed(order=order, limit=config.FEED_PAGE_SIZE, offset=offset),
+        "items": items,
         "totals": stats.feed_totals(),
         "page_size": config.FEED_PAGE_SIZE,
+        # Листаем по ключу сортировки: при OFFSET записи сдвигались между
+        # запросами страниц, потому что last_seen меняется при каждом
+        # скачивании — одни попадали на две страницы, другие ни на одну.
+        "next_cursor": (stats.encode_cursor(items[-1], order)
+                        if len(items) == config.FEED_PAGE_SIZE else None),
     }), 15)
 
 
@@ -407,12 +410,15 @@ def stats_page():
     # Данные вшиваются прямо в страницу: иначе она сначала рисуется с
     # прочерками и только потом, после асинхронного запроса, показывает
     # цифры — заметное мигание при каждой загрузке.
+    _initial_feed = stats.feed(order="recent", limit=config.FEED_PAGE_SIZE)
     return render_template("stats.html", initial={
         "stats": stats.summary(),
         "feed": {
-            "items": stats.feed(order="recent", limit=config.FEED_PAGE_SIZE),
+            "items": _initial_feed,
             "totals": stats.feed_totals(),
             "page_size": config.FEED_PAGE_SIZE,
+            "next_cursor": (stats.encode_cursor(_initial_feed[-1], "recent")
+                            if len(_initial_feed) == config.FEED_PAGE_SIZE else None),
         },
     })
 

@@ -13,6 +13,7 @@
 """
 from __future__ import annotations
 
+import base64
 import contextlib
 import logging
 import sqlite3
@@ -47,7 +48,9 @@ CREATE TABLE IF NOT EXISTS feed (
     count      INTEGER NOT NULL DEFAULT 0
 );
 CREATE INDEX IF NOT EXISTS feed_last  ON feed(last_seen DESC);
-CREATE INDEX IF NOT EXISTS feed_count ON feed(count DESC);
+-- Составной: одиночный индекс по count не покрывал вторую часть
+-- сортировки, и SQLite достраивал временное B-дерево.
+CREATE INDEX IF NOT EXISTS feed_count ON feed(count DESC, last_seen DESC, url DESC);
 
 -- Отдельные события: время КАЖДОГО скачивания, а не только первого и
 -- последнего. Здесь по-прежнему нет ничего о том, КТО скачивал — только
@@ -57,6 +60,13 @@ CREATE TABLE IF NOT EXISTS events (
     url TEXT NOT NULL,
     at  TEXT NOT NULL
 );
+-- Отметки о выполненных разовых миграциях: без них каждая из них
+-- перечитывала всю ленту при каждом старте сервиса.
+CREATE TABLE IF NOT EXISTS meta (
+    key   TEXT PRIMARY KEY,
+    value TEXT NOT NULL
+);
+
 CREATE INDEX IF NOT EXISTS events_url ON events(url, at DESC);
 CREATE INDEX IF NOT EXISTS events_at  ON events(at);
 """
@@ -121,6 +131,50 @@ def _init_unsafe() -> bool:
         conn.execute("PRAGMA journal_mode=WAL")
         conn.executescript(_SCHEMA)
     return True
+
+
+def _meta_get(key: str) -> str | None:
+    try:
+        with _lock, _connect() as conn:
+            row = conn.execute("SELECT value FROM meta WHERE key = ?", (key,)).fetchone()
+        return row[0] if row else None
+    except sqlite3.Error:
+        return None
+
+
+def _meta_set(key: str, value: str) -> None:
+    try:
+        with _lock, _connect() as conn:
+            conn.execute("INSERT INTO meta(key, value) VALUES (?, ?) "
+                         "ON CONFLICT(key) DO UPDATE SET value = excluded.value",
+                         (key, value))
+    except sqlite3.Error:
+        pass
+
+
+def prune_feed_and_daily() -> tuple[int, int]:
+    """Срок хранения для ленты и суточных счётчиков.
+
+    Обе таблицы росли бессрочно. Лента вдобавок целиком читалась
+    миграцией при каждом старте, поэтому её размер напрямую бил по
+    времени запуска и по памяти.
+    """
+    removed_feed = removed_daily = 0
+    try:
+        if config.FEED_RETENTION_DAYS > 0:
+            cutoff = (datetime.now(timezone.utc)
+                      - timedelta(days=config.FEED_RETENTION_DAYS)).isoformat()
+            with _lock, _connect() as conn:
+                cur = conn.execute("DELETE FROM feed WHERE last_seen < ?", (cutoff,))
+                removed_feed = cur.rowcount or 0
+        if config.DAILY_RETENTION_DAYS > 0:
+            day = (date.today() - timedelta(days=config.DAILY_RETENTION_DAYS)).isoformat()
+            with _lock, _connect() as conn:
+                cur = conn.execute("DELETE FROM daily WHERE day < ?", (day,))
+                removed_daily = cur.rowcount or 0
+    except sqlite3.Error:
+        logging.exception("не удалось применить срок хранения")
+    return removed_feed, removed_daily
 
 
 def round_existing_timestamps() -> int:
@@ -233,6 +287,25 @@ def selftest() -> None:
         conn.execute("DELETE FROM _probe")
 
 
+# Версия разовых преобразований. Пока она совпадает с записанной в БД,
+# миграции не запускаются: раньше каждая из них перечитывала всю ленту
+# при каждом старте сервиса, и время запуска росло вместе с таблицей.
+MIGRATION_VERSION = "2"
+
+
+def run_migrations(canonicalize) -> dict:
+    """Выполнить разовые преобразования, если они ещё не применялись."""
+    if _meta_get("migration_version") == MIGRATION_VERSION:
+        return {"skipped": True}
+    result = {
+        "rounded": round_existing_timestamps(),
+        "merged": migrate_feed(canonicalize),
+        "skipped": False,
+    }
+    _meta_set("migration_version", MIGRATION_VERSION)
+    return result
+
+
 def migrate_feed(canonicalize) -> int:
     """Привести уже накопленные ссылки к каноническому виду.
 
@@ -282,18 +355,57 @@ def migrate_feed(canonicalize) -> int:
         return 0
 
 
-def feed(order: str = "recent", limit: int = 50, offset: int = 0) -> list[dict]:
-    """Лента: последние или самые популярные."""
+def encode_cursor(row: dict, order: str) -> str:
+    """Непрозрачная метка позиции для следующей страницы."""
+    key = ([str(row["count"]), row["last_seen"], row["url"]] if order == "popular"
+           else [row["last_seen"], row["url"]])
+    raw = "\x1f".join(key).encode()
+    return base64.urlsafe_b64encode(raw).decode().rstrip("=")
+
+
+def _decode_cursor(cursor: str, order: str):
+    try:
+        pad = "=" * (-len(cursor) % 4)
+        parts = base64.urlsafe_b64decode(cursor + pad).decode().split("\x1f")
+    except Exception:
+        return None
+    want = 3 if order == "popular" else 2
+    return parts if len(parts) == want else None
+
+
+def feed(order: str = "recent", limit: int = 50,
+         cursor: str | None = None) -> list[dict]:
+    """Лента: последние или самые популярные.
+
+    Листание идёт по ключу сортировки, а не по OFFSET. При OFFSET записи
+    сдвигались между запросами страниц, потому что last_seen меняется при
+    каждом новом скачивании: одни записи попадали на две страницы, другие
+    не попадали ни на одну.
+    """
     if not config.FEED_ENABLED:
         return []
-    col = "count DESC, last_seen DESC" if order == "popular" else "last_seen DESC"
     limit = max(1, min(int(limit), 200))
+    popular = order == "popular"
+    col = "count DESC, last_seen DESC, url DESC" if popular else "last_seen DESC, url DESC"
+
+    where, args = "", []
+    key = _decode_cursor(cursor, order) if cursor else None
+    if key:
+        if popular:
+            # строгое «меньше» по составному ключу (count, last_seen, url)
+            where = ("WHERE (count < ?) OR (count = ? AND last_seen < ?) "
+                     "OR (count = ? AND last_seen = ? AND url < ?) ")
+            c, t, u = key
+            args = [c, c, t, c, t, u]
+        else:
+            where = "WHERE (last_seen < ?) OR (last_seen = ? AND url < ?) "
+            t, u = key
+            args = [t, t, u]
     try:
         with _lock, _connect() as conn:
             rows = conn.execute(
                 f"SELECT url, first_seen, last_seen, count FROM feed "
-                f"ORDER BY {col} LIMIT ? OFFSET ?", (limit, max(0, int(offset)))
-            ).fetchall()
+                f"{where}ORDER BY {col} LIMIT ?", (*args, limit)).fetchall()
         return [{"url": r[0], "first_seen": r[1], "last_seen": r[2], "count": r[3]}
                 for r in rows]
     except sqlite3.Error:

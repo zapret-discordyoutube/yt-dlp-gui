@@ -215,13 +215,25 @@ def canonical_url(url: str) -> str:
         if m:
             return f"https://vkvideo.ru/video{m.group(1)}"
 
-    # Общий случай: нормализуем схему и хост, отбрасываем якорь и мусорные
-    # параметры, оставшиеся упорядочиваем — чтобы порядок не плодил дубликаты.
+    # Общий случай: приводим регистр хоста и порядок параметров, но
+    # сохраняем то, что отличает один ресурс от другого.
+    #
+    # Раньше здесь терялись порт, схема и фрагмент. Из-за этого
+    # example.com:8080/v/1 и example.com:9090/v/1 считались одной записью,
+    # http-only сайт получал нерабочую https-ссылку, а одностраничные
+    # приложения, где идентификатор живёт в якоре (site/#/video/111),
+    # схлопывались все в одну строку.
     keep = sorted((k, v) for k, v in parse_qsl(p.query, keep_blank_values=False)
                   if k.lower() not in _JUNK_QUERY)
     query = urlencode(keep)
-    scheme = "https" if p.scheme in ("http", "https") else p.scheme
-    return urlunparse((scheme, host, path or "/", "", query, ""))
+
+    netloc = host
+    if ":" in host and not host.startswith("["):
+        netloc = f"[{host}]"          # IPv6-литерал без скобок нечитаем
+    if p.port:
+        netloc = f"{netloc}:{p.port}"
+    scheme = p.scheme if p.scheme in ("http", "https") else "https"
+    return urlunparse((scheme, netloc, path or "/", "", query, p.fragment))
 
 
 def _is_public_host(host: str) -> bool:

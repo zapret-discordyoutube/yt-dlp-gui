@@ -85,3 +85,8 @@ EVENT_RETENTION_DAYS = int(os.environ.get("YTG_EVENT_RETENTION_DAYS", "90"))
 # а не множитель от TASK_TTL: прежняя запись `TASK_TTL_MINUTES * 120`
 # читалась как путаница минут с секундами, хотя означала «два TTL».
 STUCK_TASK_SEC = int(os.environ.get("YTG_STUCK_TASK_SEC", str(8 * 3600)))
+
+# Сроки хранения. Обе таблицы росли бессрочно, а ленту вдобавок целиком
+# перечитывала миграция при каждом старте. 0 отключает очистку.
+FEED_RETENTION_DAYS = int(os.environ.get("YTG_FEED_RETENTION_DAYS", "365"))
+DAILY_RETENTION_DAYS = int(os.environ.get("YTG_DAILY_RETENTION_DAYS", "730"))
