@@ -8,6 +8,7 @@ import queue
 import re
 import socket
 import shutil
+import subprocess
 import threading
 import time
 import uuid
@@ -191,31 +192,37 @@ def parse_timecode(s: str) -> float | None:
     return sec
 
 
-def clip_extra(from_s: str, to_s: str) -> tuple[dict, str]:
-    """Опции yt-dlp для скачивания только отрезка [from..to] и подпись.
-
-    Диапазон строится из чисел (таймкоды разобраны), инъекция невозможна.
-    Пустой отрезок -> ({}, "").
-    """
+def parse_clip(from_s: str, to_s: str) -> tuple[float, float | None] | None:
+    """Разобрать отрезок в (start, end) секунд. Пусто -> None. end может быть
+    None («до конца»). Инъекция невозможна: возвращаются только числа."""
     start = parse_timecode(from_s)
     end = parse_timecode(to_s)
     if start is None and end is None:
-        return {}, ""
+        return None
     if start is None:
         start = 0.0
     if end is not None and end <= start:
         raise ValueError("bad_clip")
+    return start, end
+
+
+def clip_label(start: float, end: float | None) -> str:
+    def fmt_t(x):
+        x = int(x); h, m, s = x // 3600, (x % 3600) // 60, x % 60
+        return f"{h}:{m:02d}:{s:02d}" if h else f"{m}:{s:02d}"
+    return f"{fmt_t(start)}–{fmt_t(end) if end is not None else 'конец'}"
+
+
+def clip_range_opts(start: float, end: float | None) -> dict:
+    """Опции yt-dlp для частичного скачивания только отрезка (сайты с прямыми
+    форматами: X, Vimeo и т.п.). Для YouTube не годится — там HLS зависает,
+    его режем полным скачиванием + ffmpeg (см. DownloadManager._trim_file)."""
     rng_end = end if end is not None else float("inf")
-    extra = {
+    return {
         "download_ranges": yt_dlp.utils.download_range_func(None, [(start, rng_end)]),
         # Точная резка по границам: без этого концы съезжают к ключевым кадрам.
         "force_keyframes_at_cuts": True,
     }
-    def fmt_t(x):
-        x = int(x); h, m, s = x // 3600, (x % 3600) // 60, x % 60
-        return f"{h}:{m:02d}:{s:02d}" if h else f"{m}:{s:02d}"
-    lbl = f"{fmt_t(start)}–{fmt_t(end) if end is not None else 'конец'}"
-    return extra, lbl
 
 
 def build_from_format_id(format_id: str, container: str = "auto") -> tuple[str, dict, str]:
@@ -648,6 +655,7 @@ class Task:
     is_live: bool = False        # запись идущего эфира: стоп сохраняет записанное
     images_mode: bool = False    # скачать фото из поста-галереи (без видео)
     use_egress: bool = False     # качать через запасной egress-прокси (бан)
+    clip: tuple | None = None    # (start,end) для пост-обрезки ffmpeg (YouTube)
     status: str = "queued"       # queued|downloading|processing|finished|error|cancelled
     percent: float | None = None
     speed: float | None = None
@@ -838,13 +846,13 @@ class DownloadManager:
     def create(self, url: str, fmt: str, extra: dict, label: str,
                title: str, thumbnail: str | None, bundle: bool = False,
                is_live: bool = False, images_mode: bool = False,
-               use_egress: bool = False) -> Task:
+               use_egress: bool = False, clip: tuple | None = None) -> Task:
         # Идентификатор — единственное, что защищает чужой файл от выдачи,
         # поэтому берём его целиком, а не первые 12 символов.
         task = Task(id=uuid.uuid4().hex, url=url, title=title,
                     fmt=fmt, extra=extra, label=label, thumbnail=thumbnail,
                     bundle=bundle, is_live=is_live, images_mode=images_mode,
-                    use_egress=use_egress)
+                    use_egress=use_egress, clip=clip)
         with self.lock:
             if len(self.tasks) >= config.TASKS_MAX:
                 raise Overloaded("too_many_tasks")
@@ -1075,6 +1083,11 @@ class DownloadManager:
                 task.status = "cancelled"
                 self._cleanup_partials(task)
                 return
+            # Обрезка отрезка после полного скачивания (YouTube: HLS не даёт
+            # частично скачать секцию). ffmpeg-copy без перекодирования.
+            if task.clip and final and os.path.exists(final):
+                task.status = "processing"
+                final = self._trim_file(final, task.clip) or final
             # Несколько выходных файлов (обложка/описание отдельно, дорожки
             # без склейки) не влезают в отдачу «один файл» — пакуем в ZIP.
             if task.bundle:
@@ -1135,6 +1148,41 @@ class DownloadManager:
                     self.on_complete(task)
                 except Exception:      # статистика не должна ломать загрузку
                     pass
+
+    def _trim_file(self, path: str, clip: tuple) -> str | None:
+        """Вырезать отрезок [start,end] из готового файла через ffmpeg -c copy.
+
+        Быстрая резка без перекодирования; -ss до -i садится на ближайший
+        ключевой кадр. Возвращает путь к обрезанному файлу (заменяет исходный)
+        или None при неудаче (тогда останется целый файл).
+        """
+        start, end = clip
+        root, ext = os.path.splitext(path)
+        out = f"{root}.clip{ext}"
+        cmd = ["ffmpeg", "-y", "-ss", f"{start:.3f}", "-i", path]
+        if end is not None:
+            cmd += ["-t", f"{end - start:.3f}"]
+        cmd += ["-map", "0", "-c", "copy", "-avoid_negative_ts", "make_zero"]
+        if ext.lower() in (".mp4", ".m4a", ".mov"):
+            cmd += ["-movflags", "+faststart"]
+        cmd.append(out)
+        try:
+            r = subprocess.run(cmd, stdin=subprocess.DEVNULL,
+                               stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL,
+                               timeout=600)
+        except (OSError, subprocess.SubprocessError):
+            return None
+        if r.returncode != 0 or not os.path.exists(out) or os.path.getsize(out) == 0:
+            try:
+                os.path.exists(out) and os.unlink(out)
+            except OSError:
+                pass
+            return None
+        try:
+            os.replace(out, path)   # обрезанный занимает место исходного
+        except OSError:
+            return out
+        return path
 
     def _task_proxy(self, task: Task) -> str | None:
         """Прокси для задачи: запасной egress при бане, иначе основной PROXY."""
