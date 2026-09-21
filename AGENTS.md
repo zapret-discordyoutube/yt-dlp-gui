@@ -60,12 +60,31 @@ SNI-DPI, не блокировка IP.
   и все поддомены. Чтобы разблокировать новый сайт — **дописать его домен сюда**
   и `sudo systemctl restart zapret-egress`.
   - Уже добавлены: `soundcloud.com`, `sndcdn.com`, `x.com`, `twitter.com`,
-    `twimg.com` (плюс исходные `t.me`, `vkvideo.ru`, `xvideos.com` и т.д.).
+    `twimg.com`, `instagram.com`, `cdninstagram.com`, `fbcdn.net`,
+    `pornhub.com`, `phncdn.com` (плюс исходные `t.me`, `vkvideo.ru`,
+    `xvideos.com` и т.д.).
 - Проверка после добавления: `openssl s_client -connect <ip>:443 -servername
   <host> </dev/null` должен дать `CONNECTED`; затем `yt-dlp --simulate <url>`.
+
+## Движок yt-dlp: обязательные спутники
+
+- **curl_cffi** (в requirements.txt) — браузерный impersonate. Без него сайты
+  за Cloudflare/анти-ботом (kick.com, pornhub) отдают 403/404. yt-dlp
+  подхватывает автоматически.
+- **deno** (в `/usr/local/bin`, есть в дефолтном PATH systemd) — JS-runtime для
+  nsig-челленджа YouTube. Без него в логах предупреждение «No supported
+  JavaScript runtime», часть форматов пропадает, скорость рвётся. Ставится
+  бинарём с github релизов; кэш пишет в `$HOME/.cache/deno` (HOME=/tmp,
+  PrivateTmp — писать можно).
+- Диагностика «сайт не открывается»: `openssl s_client -connect <ip>:443
+  -servername <host>` → `Terminated` = SNI-DPI (добавить в egress-hosts.txt);
+  403/404 = нужен curl_cffi; 429/логин = ограничение сайта (напр. Instagram
+  stories требуют авторизации — не чинится).
 
 ## Ограничения
 
 - **DRM не поддерживается** (Widevine/PlayReady/FairPlay): Netflix, Spotify,
   Apple Music и пр. yt-dlp не расшифровывает — это не обходится настройкой.
+- **Instagram stories/highlights** требуют авторизации (429 без кук); DPI
+  обойдён, но приватный контент без логина не берётся.
 - Рестарт прода теряет незавершённые задачи (состояние в памяти одного процесса).
