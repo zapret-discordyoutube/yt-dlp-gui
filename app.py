@@ -215,6 +215,8 @@ def api_info():
     except ValueError as e:
         if str(e) == "too_long":
             return err(f"Слишком длинное видео (лимит {config.MAX_DURATION_SEC // 3600} ч)")
+        if str(e) == "upcoming":
+            return err("Эфир ещё не начался — попробуйте, когда трансляция пойдёт")
         return err("Не удалось разобрать ссылку")
     except dl.yt_dlp.utils.DownloadError as e:
         return err(dl._clean_err(str(e)))
@@ -250,6 +252,14 @@ def api_download():
     except ValueError as e:
         return err(message_for(e, "Неверный выбор формата"))
 
+    # Постобработка (чекбоксы): субтитры/обложка/метаданные/главы/SponsorBlock
+    # и отдельные файлы. Флаги — по белому списку внутри parse_features.
+    features = dl.parse_features(data)
+    kind_for_feat = "video" if data.get("format_id") else str(data.get("kind", "video"))
+    fmt, extra, feat_label, bundle = dl.apply_features(fmt, extra, features, kind_for_feat)
+    if feat_label:
+        label = f"{label} · {feat_label}"
+
     title = str(data.get("title") or "Видео")[:200]
     thumb = data.get("thumbnail")
     if thumb and not str(thumb).startswith(("http://", "https://")):
@@ -257,7 +267,8 @@ def api_download():
 
     try:
         task = manager.create(url=url, fmt=fmt, extra=extra, label=label,
-                              title=title, thumbnail=thumb)
+                              title=title, thumbnail=thumb, bundle=bundle,
+                              is_live=bool(data.get("is_live")))
     except dl.Overloaded:
         # честный отказ сразу, а не молчаливое ожидание в очереди
         return err("Сервис сейчас перегружен, попробуйте через пару минут", 503)

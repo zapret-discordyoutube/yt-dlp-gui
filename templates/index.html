@@ -75,6 +75,11 @@
       <div>
         <div class="title" id="pv-title"></div>
         <div class="meta" id="pv-uploader" style="margin-top:6px"></div>
+        <div class="live-note hidden" id="pv-live" style="margin-top:8px">
+          <span class="live-badge">● Прямой эфир</span>
+          Идёт трансляция. Запись пойдёт с текущего момента; чтобы остановить и
+          сохранить записанное — нажмите ✕ на карточке загрузки.
+        </div>
 
         <div style="margin-top:var(--s-5)">
           <div class="seg" id="mode-seg" role="radiogroup" aria-label="Тип загрузки">
@@ -134,6 +139,18 @@
         <div class="hidden" id="opts-all" style="margin-top:var(--s-4)">
           <div class="fmt-list" id="fmt-list" role="radiogroup" aria-label="Доступные форматы"></div>
           <p class="meta" style="margin-top:8px">Форматы только с видео или только со звуком будут объединены автоматически.</p>
+        </div>
+
+        <!-- Постобработка -->
+        <div class="pp-opts" id="pp-opts" style="margin-top:var(--s-4)">
+          <label class="chk"><input type="checkbox" id="pp-embed_subs"><span>Встроить субтитры</span></label>
+          <label class="chk"><input type="checkbox" id="pp-embed_thumbnail"><span>Встроить обложку</span></label>
+          <label class="chk"><input type="checkbox" id="pp-write_thumbnail"><span>Скачать обложку</span></label>
+          <label class="chk"><input type="checkbox" id="pp-write_description"><span>Скачать описание</span></label>
+          <label class="chk"><input type="checkbox" id="pp-embed_metadata"><span>Встроить метаданные</span></label>
+          <label class="chk"><input type="checkbox" id="pp-embed_chapters"><span>Встроить главы</span></label>
+          <label class="chk"><input type="checkbox" id="pp-sponsorblock"><span>Пропустить рекламные вставки</span></label>
+          <label class="chk"><input type="checkbox" id="pp-no_merge"><span>Не объединять аудио/видео</span></label>
         </div>
 
         <button class="btn btn--primary btn--block" id="download-btn" style="margin-top:var(--s-5)">
@@ -229,10 +246,15 @@ const store = {
 };
 let settings = Object.assign(
   { mode: "video", height: "auto", vcodec: "auto", vaudio: "auto",
-    acodec: "best", theme: null },
+    acodec: "best", theme: null, pp: {} },
   store.get(LS_SETTINGS, {})
 );
+if (!settings.pp || typeof settings.pp !== "object") settings.pp = {};
 const saveSettings = () => store.set(LS_SETTINGS, settings);
+
+/* Флаги постобработки (чекбоксы). Имена совпадают с id вида pp-<key>. */
+const PP_KEYS = ["embed_subs","embed_thumbnail","write_thumbnail",
+  "write_description","embed_metadata","embed_chapters","sponsorblock","no_merge"];
 
 /* ---------- Тема ---------- */
 const systemTheme = () =>
@@ -344,8 +366,11 @@ function renderPreview(d) {
   if (d.thumbnail) { thumb.src = d.thumbnail; thumb.alt = d.title; }
   else { thumb.removeAttribute("src"); thumb.alt = ""; }
   const dur = $("#pv-duration");
-  if (d.duration) { dur.textContent = fmtDur(d.duration); dur.classList.remove("hidden"); }
+  if (d.is_live) { dur.textContent = "LIVE"; dur.classList.remove("hidden"); }
+  else if (d.duration) { dur.textContent = fmtDur(d.duration); dur.classList.remove("hidden"); }
   else dur.classList.add("hidden");
+  $("#pv-live").classList.toggle("hidden", !d.is_live);
+  $("#download-btn").textContent = d.is_live ? "● Записать эфир" : "⭳ Скачать";
 
   // качество
   const sel = $("#sel-height");
@@ -415,6 +440,16 @@ document.querySelectorAll("#mode-seg button").forEach(b =>
   });
 });
 
+/* Чекбоксы постобработки: восстановление и сохранение выбора. */
+PP_KEYS.forEach(k => {
+  const el = $("#pp-" + k);
+  if (!el) return;
+  el.checked = !!settings.pp[k];
+  el.addEventListener("change", () => {
+    settings.pp[k] = el.checked; saveSettings();
+  });
+});
+
 /* ---------- Запуск загрузки ---------- */
 $("#download-btn").addEventListener("click", async () => {
   if (!current) return;
@@ -427,6 +462,7 @@ $("#download-btn").addEventListener("click", async () => {
     btn.removeAttribute("aria-busy");
   };
   const body = { url: current.webpage_url, title: current.title, thumbnail: current.thumbnail };
+  if (current.is_live) body.is_live = true;
   if (settings.mode === "all") {
     const picked = document.querySelector('input[name="fmt"]:checked');
     if (!picked) { toast("Выберите формат", "error"); restore(); return; }
@@ -437,6 +473,7 @@ $("#download-btn").addEventListener("click", async () => {
     body.kind = "video"; body.height = settings.height;
     body.vcodec = settings.vcodec; body.vaudio = settings.vaudio;
   }
+  PP_KEYS.forEach(k => { if (settings.pp[k]) body[k] = true; });
 
   try {
     const r = await fetch("/api/downloads", {

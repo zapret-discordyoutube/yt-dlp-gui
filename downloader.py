@@ -11,6 +11,7 @@ import shutil
 import threading
 import time
 import uuid
+import zipfile
 from dataclasses import dataclass, field
 from pathlib import Path
 from urllib.parse import parse_qs, parse_qsl, urlencode, urlparse, urlunparse
@@ -162,6 +163,101 @@ def build_from_format_id(format_id: str, container: str = "auto") -> tuple[str, 
     return fid, extra, f"формат {fid}"
 
 
+# --- Постобработка: чекбоксы UI -> опции yt-dlp ---
+# Строгий белый список булевых флагов. Всё, чего здесь нет, игнорируется:
+# клиент по-прежнему не может передать произвольную опцию yt-dlp.
+_FEATURE_KEYS = (
+    "embed_subs", "embed_thumbnail", "write_thumbnail", "write_description",
+    "embed_metadata", "embed_chapters", "sponsorblock", "no_merge",
+)
+# Флаги, способные породить более одного файла -> итог упаковываем в ZIP.
+_MULTIFILE_FEATURES = {"write_thumbnail", "write_description", "no_merge"}
+
+_FEATURE_LABELS = {
+    "embed_subs": "субтитры",
+    "embed_thumbnail": "обложка",
+    "write_thumbnail": "обложка-файл",
+    "write_description": "описание",
+    "embed_metadata": "метаданные",
+    "embed_chapters": "главы",
+    "sponsorblock": "без рекламы",
+    "no_merge": "без склейки",
+}
+
+
+def parse_features(data) -> dict:
+    """Булевы флаги постобработки из запроса, только по белому списку."""
+    raw = data if isinstance(data, dict) else {}
+    return {k: True for k in _FEATURE_KEYS if raw.get(k)}
+
+
+def apply_features(fmt: str, extra: dict, features: dict,
+                   kind: str) -> tuple[str, dict, str, bool]:
+    """Дополнить (fmt, extra) опциями постобработки.
+
+    Возвращает (fmt, extra, подпись, bundle). extra уже может нести
+    postprocessors (извлечение аудио) и merge_output_format — их дополняем,
+    не затирая. bundle=True, если ожидается несколько файлов (нужен ZIP).
+    """
+    if not features:
+        return fmt, extra, "", False
+    extra = dict(extra)
+    pps = list(extra.get("postprocessors") or [])
+    is_audio = (kind == "audio")
+
+    # Субтитры вшиваем только в видео: в аудиоконтейнер их не положить.
+    if features.get("embed_subs") and not is_audio:
+        extra["writesubtitles"] = True
+        extra["subtitleslangs"] = ["all", "-live_chat"]
+        pps.append({"key": "FFmpegEmbedSubtitle",
+                    "already_have_subtitle": False})
+
+    if features.get("embed_thumbnail"):
+        extra["writethumbnail"] = True
+        # already_have_thumbnail=True -> файл обложки НЕ удаляется после
+        # встраивания; ставим его, только когда обложку просят и отдельным
+        # файлом тоже. Иначе обложка удаляется и остаётся один файл.
+        pps.append({"key": "EmbedThumbnail",
+                    "already_have_thumbnail": bool(features.get("write_thumbnail"))})
+
+    # Метаданные и главы — один проход FFmpegMetadata.
+    if features.get("embed_metadata") or features.get("embed_chapters"):
+        pps.append({
+            "key": "FFmpegMetadata",
+            "add_metadata": bool(features.get("embed_metadata")),
+            "add_chapters": True if features.get("embed_chapters") else None,
+        })
+
+    # SponsorBlock: сначала получить сегменты, затем вырезать. Порядок в
+    # списке важен — SponsorBlock должен идти раньше ModifyChapters.
+    if features.get("sponsorblock"):
+        pps.append({"key": "SponsorBlock", "categories": ["sponsor"],
+                    "api": "https://sponsor.ajay.app"})
+        pps.append({"key": "ModifyChapters",
+                    "remove_sponsor_segments": ["sponsor"]})
+
+    # Отдельные файлы обложки/описания.
+    if features.get("write_thumbnail"):
+        extra["writethumbnail"] = True
+    if features.get("write_description"):
+        extra["writedescription"] = True
+
+    # Не объединять аудио/видео: осмысленно для явной связки a+b без каскада
+    # (выбор конкретного формата во «Все форматы»). Меняем '+' на ',' — yt-dlp
+    # скачает дорожки раздельно, склейку убираем. Пресетные каскады с '/'
+    # не трогаем: там всегда есть запасные варианты, и запятая их сломала бы.
+    if features.get("no_merge") and "+" in fmt and "/" not in fmt:
+        fmt = fmt.replace("+", ",")
+        extra.pop("merge_output_format", None)
+
+    if pps:
+        extra["postprocessors"] = pps
+    label = ", ".join(_FEATURE_LABELS[k] for k in _FEATURE_KEYS
+                      if features.get(k))
+    bundle = any(features.get(k) for k in _MULTIFILE_FEATURES)
+    return fmt, extra, label, bundle
+
+
 # Параметры, не влияющие на то, какой это ролик: метки переходов, тайм-коды,
 # идентификаторы сессий. Их нельзя публиковать и нельзя учитывать при
 # сравнении ссылок.
@@ -290,8 +386,16 @@ def probe(url: str) -> dict:
     with yt_dlp.YoutubeDL(opts) as ydl:
         info = ydl.sanitize_info(ydl.extract_info(url, download=False))
 
+    # Прямые эфиры: идущий можно записывать, будущий — ещё нельзя.
+    live_status = info.get("live_status")
+    is_live = bool(info.get("is_live")) or live_status == "is_live"
+    if live_status == "is_upcoming":
+        raise ValueError("upcoming")
+
     duration = info.get("duration")
-    if duration and duration > config.MAX_DURATION_SEC:
+    # У идущего эфира длительности нет — ограничение по времени к нему
+    # неприменимо (его границу задаёт размер файла и ручная остановка).
+    if duration and not is_live and duration > config.MAX_DURATION_SEC:
         raise ValueError("too_long")
 
     # доступные высоты видео -> для простого селектора качества
@@ -349,6 +453,7 @@ def probe(url: str) -> dict:
         "webpage_url": info.get("webpage_url") or url,
         "extractor": info.get("extractor_key") or info.get("extractor"),
         "heights": avail,
+        "is_live": is_live,
     }
 
 
@@ -362,6 +467,8 @@ class Task:
     extra: dict                  # доп. опции yt-dlp (merge/postprocessors)
     label: str                   # человекочитаемая подпись выбора
     thumbnail: str | None = None
+    bundle: bool = False         # упаковать несколько файлов в один ZIP
+    is_live: bool = False        # запись идущего эфира: стоп сохраняет записанное
     status: str = "queued"       # queued|downloading|processing|finished|error|cancelled
     percent: float | None = None
     speed: float | None = None
@@ -550,11 +657,13 @@ class DownloadManager:
 
     # ---- запуск задачи ----
     def create(self, url: str, fmt: str, extra: dict, label: str,
-               title: str, thumbnail: str | None) -> Task:
+               title: str, thumbnail: str | None, bundle: bool = False,
+               is_live: bool = False) -> Task:
         # Идентификатор — единственное, что защищает чужой файл от выдачи,
         # поэтому берём его целиком, а не первые 12 символов.
         task = Task(id=uuid.uuid4().hex, url=url, title=title,
-                    fmt=fmt, extra=extra, label=label, thumbnail=thumbnail)
+                    fmt=fmt, extra=extra, label=label, thumbnail=thumbnail,
+                    bundle=bundle, is_live=is_live)
         with self.lock:
             if len(self.tasks) >= config.TASKS_MAX:
                 raise Overloaded("too_many_tasks")
@@ -718,6 +827,10 @@ class DownloadManager:
                 "concurrent_fragment_downloads": config.CONCURRENT_FRAGMENTS,
                 "logger": _QuietLogger(),
                 **({"proxy": config.PROXY} if config.PROXY else {}),
+                # Эфир пишем в MPEG-TS: такой контейнер остаётся проигрываемым,
+                # даже если запись оборвать на середине (нет moov-атома, как у
+                # mp4). Именно это делает «стоп и сохранить» осмысленным.
+                **({"hls_use_mpegts": True} if task.is_live else {}),
                 "format": fmt,
                 "max_filesize": config.MAX_FILESIZE_MB * 1024 * 1024,
                 "progress_hooks": [self._make_hook(task)],
@@ -757,6 +870,10 @@ class DownloadManager:
                 task.status = "cancelled"
                 self._cleanup_partials(task)
                 return
+            # Несколько выходных файлов (обложка/описание отдельно, дорожки
+            # без склейки) не влезают в отдачу «один файл» — пакуем в ZIP.
+            if task.bundle:
+                final = self._bundle_outputs(task) or final
             if final and os.path.exists(final):
                 task.filename = os.path.basename(final)          # <id>.<ext>
                 ext = os.path.splitext(final)[1]
@@ -768,10 +885,23 @@ class DownloadManager:
                 task.error = "Файл не найден после скачивания"
                 task.status = "error"
         except yt_dlp.utils.DownloadCancelled:
-            # Сторож мог прервать загрузку по размеру или нехватке места —
-            # тогда это ошибка с причиной, а не тихая отмена пользователем.
-            task.status = "error" if task.error else "cancelled"
-            self._cleanup_partials(task)
+            # Для эфира ручная остановка (без ошибки сторожа) означает
+            # «сохранить записанное», а не выбросить. Сторож же ставит
+            # task.error и обрывает — тогда чистим, как обычную ошибку.
+            saved = (self._finalize_partial(task)
+                     if task.is_live and not task.error else None)
+            if saved:
+                task.filename = os.path.basename(saved)
+                ext = os.path.splitext(saved)[1]
+                task.display_name = pretty_filename(task.title, ext)
+                task.filesize = os.path.getsize(saved)
+                task.percent = 100
+                task.status = "finished"
+            else:
+                # Сторож мог прервать загрузку по размеру или нехватке места —
+                # тогда это ошибка с причиной, а не тихая отмена пользователем.
+                task.status = "error" if task.error else "cancelled"
+                self._cleanup_partials(task)
         except (yt_dlp.utils.DownloadError,
                 yt_dlp.utils.UnavailableVideoError) as e:
             # осмысленное сообщение самого yt-dlp — показываем очищенным
@@ -800,6 +930,67 @@ class DownloadManager:
                     self.on_complete(task)
                 except Exception:      # статистика не должна ломать загрузку
                     pass
+
+    def _bundle_outputs(self, task: Task) -> str | None:
+        """Собрать все файлы задачи в один ZIP, если их больше одного.
+
+        Возвращает путь к архиву (или к единственному файлу, если пакуемого
+        оказалось не больше одного). Исходные файлы после упаковки удаляем.
+        """
+        files = [p for p in sorted(config.DOWNLOAD_DIR.glob(f"{task.id}.*"))
+                 if p.suffix.lower() not in {".part", ".ytdl", ".temp"}
+                 and ".part-" not in p.name]
+        if len(files) <= 1:
+            return str(files[0]) if files else None
+        zpath = config.DOWNLOAD_DIR / f"{task.id}.zip"
+        stem = pretty_filename(task.title, "")
+        used: set[str] = set()
+        # ZIP_STORED: медиа уже сжато, а хост — гипервизор; не тратим CPU
+        # соседних ВМ на бесполезную компрессию.
+        with zipfile.ZipFile(zpath, "w", zipfile.ZIP_STORED) as z:
+            for p in files:
+                ext = p.suffix or ""
+                arc = f"{stem}{ext}"
+                n = 1
+                while arc in used:
+                    n += 1
+                    arc = f"{stem} ({n}){ext}"
+                used.add(arc)
+                z.write(p, arcname=arc)
+        for p in files:
+            try:
+                p.unlink()
+            except OSError:
+                pass
+        return str(zpath)
+
+    def _finalize_partial(self, task: Task) -> str | None:
+        """Превратить прерванную запись эфира в готовый файл.
+
+        Берём самый крупный кусок задачи и снимаем суффикс .part. Для эфира
+        в MPEG-TS такой файл остаётся проигрываемым.
+        """
+        best = None
+        best_size = 0
+        for p in config.DOWNLOAD_DIR.glob(f"{task.id}.*"):
+            if p.suffix in (".ytdl", ".temp"):
+                continue
+            try:
+                sz = p.stat().st_size
+            except OSError:
+                continue
+            if sz > best_size:
+                best, best_size = p, sz
+        if not best or best_size == 0:
+            return None
+        if best.name.endswith(".part"):
+            final = best.with_name(best.name[:-len(".part")])
+            try:
+                best.replace(final)
+                return str(final)
+            except OSError:
+                return str(best)
+        return str(best)
 
     def _cleanup_partials(self, task: Task) -> None:
         # только файлы этой задачи: имена начинаются с её id
