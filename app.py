@@ -276,7 +276,8 @@ def api_download():
         task = manager.create(url=url, fmt=fmt, extra=extra, label=label,
                               title=title, thumbnail=thumb, bundle=bundle,
                               is_live=bool(data.get("is_live")),
-                              images_mode=images_mode)
+                              images_mode=images_mode,
+                              use_egress=bool(data.get("via_egress")))
     except dl.Overloaded:
         # честный отказ сразу, а не молчаливое ожидание в очереди
         return err("Сервис сейчас перегружен, попробуйте через пару минут", 503)

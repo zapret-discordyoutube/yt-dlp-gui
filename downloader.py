@@ -413,7 +413,23 @@ def _img_ext(content_type: str | None, url: str) -> str:
     return (m.group(1).lower().replace("jpeg", "jpg")) if m else "jpg"
 
 
-def probe(url: str) -> dict:
+# Признаки того, что контент забанен/недоступен ИМЕННО с этого IP или в
+# регионе — тогда осмысленно повторить через запасной egress-прокси.
+_BAN_SIGNATURES = (
+    "your ip address is blocked", "ip address is blocked",
+    "not available in your country", "not available from your location",
+    "not available in your region", "geo restricted", "geo-restricted",
+    "blocked it in your country", "this content is not available in your",
+    "http error 403", "403: forbidden",
+)
+
+
+def _is_ban_error(msg: str) -> bool:
+    m = (msg or "").lower()
+    return any(s in m for s in _BAN_SIGNATURES)
+
+
+def _probe_extract(url: str, proxy: str | None) -> dict:
     opts = {
         "quiet": True,
         "no_warnings": True,
@@ -427,10 +443,23 @@ def probe(url: str) -> dict:
         "socket_timeout": 30,
         # без своего логгера yt-dlp печатает ошибки со ссылкой в stderr
         "logger": _QuietLogger(),
-        **({"proxy": config.PROXY} if config.PROXY else {}),
+        **({"proxy": proxy} if proxy else {}),
     }
     with yt_dlp.YoutubeDL(opts) as ydl:
-        info = ydl.sanitize_info(ydl.extract_info(url, download=False))
+        return ydl.sanitize_info(ydl.extract_info(url, download=False))
+
+
+def probe(url: str) -> dict:
+    # Прямой доступ; при бане (IP-блок/гео/403) — повтор через egress-прокси.
+    via_egress = False
+    try:
+        info = _probe_extract(url, config.PROXY or None)
+    except yt_dlp.utils.DownloadError as e:
+        if config.EGRESS_PROXY and _is_ban_error(str(e)):
+            info = _probe_extract(url, config.EGRESS_PROXY)
+            via_egress = True
+        else:
+            raise
 
     # Прямые эфиры: идущий можно записывать, будущий — ещё нельзя.
     live_status = info.get("live_status")
@@ -506,6 +535,7 @@ def probe(url: str) -> dict:
         "is_live": is_live,
         "is_gallery": is_gallery,
         "image_count": len(images),
+        "via_egress": via_egress,
     }
 
 
@@ -522,6 +552,7 @@ class Task:
     bundle: bool = False         # упаковать несколько файлов в один ZIP
     is_live: bool = False        # запись идущего эфира: стоп сохраняет записанное
     images_mode: bool = False    # скачать фото из поста-галереи (без видео)
+    use_egress: bool = False     # качать через запасной egress-прокси (бан)
     status: str = "queued"       # queued|downloading|processing|finished|error|cancelled
     percent: float | None = None
     speed: float | None = None
@@ -711,12 +742,14 @@ class DownloadManager:
     # ---- запуск задачи ----
     def create(self, url: str, fmt: str, extra: dict, label: str,
                title: str, thumbnail: str | None, bundle: bool = False,
-               is_live: bool = False, images_mode: bool = False) -> Task:
+               is_live: bool = False, images_mode: bool = False,
+               use_egress: bool = False) -> Task:
         # Идентификатор — единственное, что защищает чужой файл от выдачи,
         # поэтому берём его целиком, а не первые 12 символов.
         task = Task(id=uuid.uuid4().hex, url=url, title=title,
                     fmt=fmt, extra=extra, label=label, thumbnail=thumbnail,
-                    bundle=bundle, is_live=is_live, images_mode=images_mode)
+                    bundle=bundle, is_live=is_live, images_mode=images_mode,
+                    use_egress=use_egress)
         with self.lock:
             if len(self.tasks) >= config.TASKS_MAX:
                 raise Overloaded("too_many_tasks")
@@ -898,7 +931,8 @@ class DownloadManager:
                     "retries": 5,
                     "concurrent_fragment_downloads": config.CONCURRENT_FRAGMENTS,
                     "logger": _QuietLogger(),
-                    **({"proxy": config.PROXY} if config.PROXY else {}),
+                    **({"proxy": self._task_proxy(task)}
+                       if self._task_proxy(task) else {}),
                     # Эфир пишем в MPEG-TS: такой контейнер остаётся
                     # проигрываемым, даже если запись оборвать на середине (нет
                     # moov-атома, как у mp4). Это и делает «стоп и сохранить».
@@ -1003,6 +1037,12 @@ class DownloadManager:
                 except Exception:      # статистика не должна ломать загрузку
                     pass
 
+    def _task_proxy(self, task: Task) -> str | None:
+        """Прокси для задачи: запасной egress при бане, иначе основной PROXY."""
+        if task.use_egress and config.EGRESS_PROXY:
+            return config.EGRESS_PROXY
+        return config.PROXY or None
+
     def _download_images(self, task: Task) -> str | None:
         """Скачать картинки поста-галереи напрямую (Instagram/Twitter и т.п.).
 
@@ -1011,11 +1051,12 @@ class DownloadManager:
         источник), а не от клиента.
         """
         task.status = "downloading"
+        proxy = self._task_proxy(task)
         opts = {
             "quiet": True, "no_warnings": True, "skip_download": True,
             "ignore_no_formats_error": True, "socket_timeout": 30,
             "logger": _QuietLogger(),
-            **({"proxy": config.PROXY} if config.PROXY else {}),
+            **({"proxy": proxy} if proxy else {}),
         }
         with yt_dlp.YoutubeDL(opts) as ydl:
             info = ydl.sanitize_info(ydl.extract_info(task.url, download=False))
@@ -1024,12 +1065,14 @@ class DownloadManager:
             task.error = "В посте не найдено изображений"
             return None
         from curl_cffi import requests as _cffi   # импортируется лениво
+        img_proxies = {"http": proxy, "https": proxy} if proxy else None
         total = saved = 0
         for i, u in enumerate(urls, 1):
             if task.cancel.is_set():
                 raise yt_dlp.utils.DownloadCancelled()
             try:
-                r = _cffi.get(u, impersonate="chrome", timeout=30)
+                r = _cffi.get(u, impersonate="chrome", timeout=30,
+                              proxies=img_proxies)
             except Exception:
                 continue
             if getattr(r, "status_code", 0) != 200:

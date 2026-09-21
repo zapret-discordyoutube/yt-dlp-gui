@@ -520,6 +520,7 @@ $("#download-btn").addEventListener("click", async () => {
   };
   const body = { url: current.webpage_url, title: current.title, thumbnail: current.thumbnail };
   if (current.is_live) body.is_live = true;
+  if (current.via_egress) body.via_egress = true;
   if (current.is_gallery) {
     // Галерея: качаем фото архивом, выбор формата и постобработка неприменимы.
     body.kind = "image";

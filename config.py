@@ -31,6 +31,11 @@ CONCURRENT_FRAGMENTS = int(os.environ.get("YTG_CONCURRENT_FRAGMENTS", "8"))
 # от пользователя: произвольный прокси — это готовый SSRF.
 # Нужен там, где сайт недоступен напрямую из сети хоста.
 PROXY = os.environ.get("YTG_PROXY", "").strip()
+# Прокси-«запаска» ТОЛЬКО для забаненного напрямую контента (IP-блок, гео,
+# 403). В отличие от PROXY гоняется не всегда, а лишь когда прямой доступ
+# упёрся в бан — тогда probe пробует ещё раз через него, и если помогло,
+# скачивание идёт тоже через него. Пусто -> механизм выключен.
+EGRESS_PROXY = os.environ.get("YTG_EGRESS_PROXY", "").strip()
 MAX_FILESIZE_MB = int(os.environ.get("YTG_MAX_FILESIZE_MB", "2048"))   # потолок на один файл
 MAX_DURATION_SEC = int(os.environ.get("YTG_MAX_DURATION_SEC", str(4 * 3600)))  # 4 часа
 DISK_QUOTA_MB = int(os.environ.get("YTG_DISK_QUOTA_MB", "5120"))       # 5 ГБ на всю папку
