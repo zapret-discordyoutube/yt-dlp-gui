@@ -263,6 +263,11 @@ def api_download():
     if not images_mode:
         features = dl.parse_features(data)
         kind_for_feat = "video" if data.get("format_id") else str(data.get("kind", "video"))
+        # Для аудио обложку и метаданные встраиваем всегда: музыке нужна
+        # обложка, а тянуть её вручную галочкой неудобно.
+        if kind_for_feat == "audio":
+            features["embed_thumbnail"] = True
+            features["embed_metadata"] = True
         fmt, extra, feat_label, bundle = dl.apply_features(fmt, extra, features, kind_for_feat)
         if feat_label:
             label = f"{label} · {feat_label}"

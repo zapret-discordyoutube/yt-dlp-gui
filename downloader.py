@@ -84,7 +84,12 @@ def build_format(kind: str, height: str = "auto", acodec: str = "best",
             "aac":  "bestaudio[acodec^=mp4a]/bestaudio/best",
             "opus": "bestaudio[acodec^=opus]/bestaudio/best",
         }.get(acodec, "bestaudio/best")
-        return prefer, {"postprocessors": [pp]}, label
+        extra: dict = {"postprocessors": [pp]}
+        if acodec == "mp3":
+            # ffmpeg по умолчанию пишет ID3v2.4, а Windows Explorer показывает
+            # встроенную обложку MP3 только у ID3v2.3. Форсируем 2.3.
+            extra["postprocessor_args"] = {"default": ["-id3v2_version", "3"]}
+        return prefer, extra, label
 
     if kind == "video":
         if vcodec not in _VCODECS:
