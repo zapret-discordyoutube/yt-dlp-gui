@@ -24,7 +24,7 @@ TASKS_MAX = int(os.environ.get("YTG_TASKS_MAX", "500"))
 # Без этого фрагменты тянутся строго по одному, и скорость упирается в
 # задержку до сервера, а не в канал. Держим умеренным: значение умножается
 # на число одновременных загрузок, а хост — гипервизор.
-CONCURRENT_FRAGMENTS = int(os.environ.get("YTG_CONCURRENT_FRAGMENTS", "5"))
+CONCURRENT_FRAGMENTS = int(os.environ.get("YTG_CONCURRENT_FRAGMENTS", "8"))
 
 # Прокси для исходящих запросов yt-dlp (socks5://host:port или http://...).
 # Задаётся ТОЛЬКО администратором через окружение и никогда не принимается
