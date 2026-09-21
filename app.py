@@ -262,6 +262,7 @@ def api_download():
     # и отдельные файлы. Флаги — по белому списку внутри parse_features.
     # К фото-режиму не применяем: там нет форматов и постпроцессоров.
     bundle = False
+    clip_task = None
     if not images_mode:
         features = dl.parse_features(data)
         kind_for_feat = "video" if data.get("format_id") else str(data.get("kind", "video"))
@@ -273,17 +274,21 @@ def api_download():
         fmt, extra, feat_label, bundle = dl.apply_features(fmt, extra, features, kind_for_feat)
         if feat_label:
             label = f"{label} · {feat_label}"
-        # Отрезок «с X по Y»: качаем только нужный кусок.
+        # Отрезок «с X по Y».
         try:
-            clip, clip_label = dl.clip_extra(
+            clip = dl.parse_clip(
                 str(data.get("clip_from", "")), str(data.get("clip_to", "")))
         except ValueError:
             return err("Неверный отрезок: конец должен быть больше начала")
         if clip:
+            label = f"{label} · ✂ {dl.clip_label(*clip)}"
+            # YouTube отдаёт HLS — частично секцию не скачать, там режем после
+            # полного скачивания (clip_task). На прочих сайтах — частичная
+            # загрузка только отрезка через download_ranges.
             if dl.is_youtube(url):
-                return err("Обрезка для YouTube пока недоступна — скачайте ролик целиком")
-            extra = {**extra, **clip}
-            label = f"{label} · ✂ {clip_label}"
+                clip_task = clip
+            else:
+                extra = {**extra, **dl.clip_range_opts(*clip)}
 
     title = str(data.get("title") or "Видео")[:200]
     thumb = data.get("thumbnail")
@@ -295,7 +300,8 @@ def api_download():
                               title=title, thumbnail=thumb, bundle=bundle,
                               is_live=bool(data.get("is_live")),
                               images_mode=images_mode,
-                              use_egress=bool(data.get("via_egress")))
+                              use_egress=bool(data.get("via_egress")),
+                              clip=clip_task)
     except dl.Overloaded:
         # честный отказ сразу, а не молчаливое ожидание в очереди
         return err("Сервис сейчас перегружен, попробуйте через пару минут", 503)
