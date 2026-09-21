@@ -447,7 +447,10 @@ class DownloadManager:
         # 2) страховочное удаление файлов, которые так и не забрали
         cutoff = now - config.FILE_TTL_MINUTES * 60
         for p in config.DOWNLOAD_DIR.iterdir():
-            if p.is_file():
+            # .gitkeep исключён и при подметании на старте: без этого
+            # маркер каталога удалялся по TTL, и каталог переставал
+            # восстанавливаться из репозитория.
+            if p.is_file() and p.name != ".gitkeep":
                 try:
                     if p.stat().st_mtime < cutoff:
                         p.unlink()

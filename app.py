@@ -19,6 +19,10 @@ import stats
 
 app = Flask(__name__)
 app.config["JSON_AS_ASCII"] = False
+# Статика (стили и восемь файлов шрифта) отдаётся этим же процессом, а
+# потоки здесь дефицитны из-за SSE. Без кэширования браузер ревалидировал
+# все девять файлов на каждой навигации.
+app.config["SEND_FILE_MAX_AGE_DEFAULT"] = 60 * 60 * 24 * 30
 
 if config.TRUST_PROXY:
     app.wsgi_app = ProxyFix(app.wsgi_app, x_for=1, x_proto=1, x_host=1)
@@ -158,8 +162,14 @@ def readyz():
     checks["queue"] = h["queue_pending"] < config.QUEUE_MAX
 
     ok = all(checks.values())
-    return jsonify({"ok": ok, "checks": checks, "metrics": h,
-                    "version": dl.yt_dlp.version.__version__}), (200 if ok else 503)
+    body = {"ok": ok, "checks": checks}
+    # Числа (свободное место на разделе гипервизора, глубина очереди,
+    # версия yt-dlp) — только для локального мониторинга. Наружу уходит
+    # лишь признак готовности: сайт публичный.
+    if request.remote_addr in ("127.0.0.1", "::1"):
+        body["metrics"] = h
+        body["version"] = dl.yt_dlp.version.__version__
+    return jsonify(body), (200 if ok else 503)
 
 
 @app.get("/healthz")

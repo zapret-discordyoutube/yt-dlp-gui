@@ -52,7 +52,11 @@ JANITOR_INTERVAL_SEC = int(os.environ.get("YTG_JANITOR_INTERVAL_SEC", "30"))
 # на 2,3 Мбит/с. Общий объём ограничивает не время, а квота DISK_QUOTA_MB.
 FILE_TTL_MINUTES = int(os.environ.get("YTG_FILE_TTL_MINUTES", "120"))
 # Карточки задач держатся в памяти недолго и нигде не персистятся.
-TASK_TTL_MINUTES = int(os.environ.get("YTG_TASK_TTL_MINUTES", "120"))
+# Срок заведомо больше FILE_TTL_MINUTES: карточка отсчитывается от создания
+# задачи, а файл — от окончания скачивания, поэтому при равных значениях
+# карточка истекала раньше файла ровно на длительность загрузки, и файл
+# оставался на диске недостижимым, занимая квоту.
+TASK_TTL_MINUTES = int(os.environ.get("YTG_TASK_TTL_MINUTES", "240"))
 # Не писать URL/IP пользователей в логи.
 QUIET_ACCESS_LOG = os.environ.get("YTG_QUIET_ACCESS_LOG", "1") == "1"
 
