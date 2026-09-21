@@ -80,6 +80,10 @@
           Идёт трансляция. Запись пойдёт с текущего момента; чтобы остановить и
           сохранить записанное — нажмите ✕ на карточке загрузки.
         </div>
+        <div class="live-note hidden" id="pv-gallery" style="margin-top:8px">
+          <span class="live-badge live-badge--img">🖼 Фото</span>
+          Пост с изображениями (<span id="pv-gallery-count"></span>). Скачаются одним архивом.
+        </div>
 
         <div style="margin-top:var(--s-5)">
           <div class="seg" id="mode-seg" role="radiogroup" aria-label="Тип загрузки">
@@ -390,7 +394,16 @@ function renderPreview(d) {
   $("#sel-acodec").value = settings.acodec;
 
   renderFormats(d.formats || []);
-  setMode(settings.mode);
+
+  // Пост-галерея (фото без видео): прячем выбор формата, качаем архивом.
+  const gallery = !!d.is_gallery;
+  $("#pv-gallery").classList.toggle("hidden", !gallery);
+  if (gallery) $("#pv-gallery-count").textContent = (d.image_count || 0) + " фото";
+  ["mode-seg", "opts-video", "opts-audio", "opts-all", "pp-opts"].forEach(id =>
+    $("#" + id).classList.toggle("hidden", gallery));
+  if (!gallery) setMode(settings.mode);
+  $("#download-btn").textContent =
+    gallery ? "⭳ Скачать фото" : (d.is_live ? "● Записать эфир" : "⭳ Скачать");
 
   $("#preview").classList.remove("hidden");
   $("#preview").classList.add("card--enter");
@@ -467,17 +480,22 @@ $("#download-btn").addEventListener("click", async () => {
   };
   const body = { url: current.webpage_url, title: current.title, thumbnail: current.thumbnail };
   if (current.is_live) body.is_live = true;
-  if (settings.mode === "all") {
-    const picked = document.querySelector('input[name="fmt"]:checked');
-    if (!picked) { toast("Выберите формат", "error"); restore(); return; }
-    body.format_id = picked.value;
-  } else if (settings.mode === "audio") {
-    body.kind = "audio"; body.acodec = settings.acodec;
+  if (current.is_gallery) {
+    // Галерея: качаем фото архивом, выбор формата и постобработка неприменимы.
+    body.kind = "image";
   } else {
-    body.kind = "video"; body.height = settings.height;
-    body.vcodec = settings.vcodec; body.vaudio = settings.vaudio;
+    if (settings.mode === "all") {
+      const picked = document.querySelector('input[name="fmt"]:checked');
+      if (!picked) { toast("Выберите формат", "error"); restore(); return; }
+      body.format_id = picked.value;
+    } else if (settings.mode === "audio") {
+      body.kind = "audio"; body.acodec = settings.acodec;
+    } else {
+      body.kind = "video"; body.height = settings.height;
+      body.vcodec = settings.vcodec; body.vaudio = settings.vaudio;
+    }
+    PP_KEYS.forEach(k => { if (settings.pp[k]) body[k] = true; });
   }
-  PP_KEYS.forEach(k => { if (settings.pp[k]) body[k] = true; });
 
   try {
     const r = await fetch("/api/downloads", {

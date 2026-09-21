@@ -237,8 +237,12 @@ def api_download():
     except ValueError as e:
         return err(message_for(e, "Плохая ссылка"))
 
+    images_mode = str(data.get("kind")) == "image"
     try:
-        if data.get("format_id"):
+        if images_mode:
+            # Пост-галерея: формат не выбираем, картинки берёт сам воркер.
+            fmt, extra, label = "", {}, "фото"
+        elif data.get("format_id"):
             fmt, extra, label = dl.build_from_format_id(
                 str(data["format_id"]), str(data.get("container", "auto")))
         else:
@@ -254,11 +258,14 @@ def api_download():
 
     # Постобработка (чекбоксы): субтитры/обложка/метаданные/главы/SponsorBlock
     # и отдельные файлы. Флаги — по белому списку внутри parse_features.
-    features = dl.parse_features(data)
-    kind_for_feat = "video" if data.get("format_id") else str(data.get("kind", "video"))
-    fmt, extra, feat_label, bundle = dl.apply_features(fmt, extra, features, kind_for_feat)
-    if feat_label:
-        label = f"{label} · {feat_label}"
+    # К фото-режиму не применяем: там нет форматов и постпроцессоров.
+    bundle = False
+    if not images_mode:
+        features = dl.parse_features(data)
+        kind_for_feat = "video" if data.get("format_id") else str(data.get("kind", "video"))
+        fmt, extra, feat_label, bundle = dl.apply_features(fmt, extra, features, kind_for_feat)
+        if feat_label:
+            label = f"{label} · {feat_label}"
 
     title = str(data.get("title") or "Видео")[:200]
     thumb = data.get("thumbnail")
@@ -268,7 +275,8 @@ def api_download():
     try:
         task = manager.create(url=url, fmt=fmt, extra=extra, label=label,
                               title=title, thumbnail=thumb, bundle=bundle,
-                              is_live=bool(data.get("is_live")))
+                              is_live=bool(data.get("is_live")),
+                              images_mode=images_mode)
     except dl.Overloaded:
         # честный отказ сразу, а не молчаливое ожидание в очереди
         return err("Сервис сейчас перегружен, попробуйте через пару минут", 503)

@@ -372,11 +372,55 @@ def validate_url(url: str) -> str:
 
 
 # --- Извлечение метаданных без скачивания ---
+def _best_image(entry: dict) -> str | None:
+    """Лучший URL картинки записи: yt-dlp сортирует thumbnails от худшей к
+    лучшей, берём последнюю с http-адресом."""
+    for t in reversed(entry.get("thumbnails") or []):
+        u = t.get("url")
+        if u and u.startswith(("http://", "https://")):
+            return u
+    u = entry.get("display_url") or entry.get("url")
+    return u if u and str(u).startswith(("http://", "https://")) else None
+
+
+def collect_images(info: dict) -> list[str]:
+    """URL картинок из поста без видео (галереи Instagram/Twitter).
+
+    Берём только записи без видеоформатов, чтобы не хватать превью настоящих
+    роликов. Возвращаем уникальные адреса в исходном порядке.
+    """
+    entries = info.get("entries")
+    src = entries if entries is not None else [info]
+    urls, seen = [], set()
+    for e in src or []:
+        if not isinstance(e, dict) or (e.get("formats") or []):
+            continue
+        u = _best_image(e)
+        if u and u not in seen:
+            seen.add(u)
+            urls.append(u)
+    return urls
+
+
+def _img_ext(content_type: str | None, url: str) -> str:
+    """Расширение картинки по Content-Type, с запасным разбором URL."""
+    ct = (content_type or "").split(";")[0].strip().lower()
+    by_ct = {"image/jpeg": "jpg", "image/jpg": "jpg", "image/png": "png",
+             "image/webp": "webp", "image/gif": "gif", "image/heic": "heic"}
+    if ct in by_ct:
+        return by_ct[ct]
+    m = re.search(r"\.(jpe?g|png|webp|gif|heic)(?:[?&]|$)", url, re.I)
+    return (m.group(1).lower().replace("jpeg", "jpg")) if m else "jpg"
+
+
 def probe(url: str) -> dict:
     opts = {
         "quiet": True,
         "no_warnings": True,
         "skip_download": True,
+        # Посты с одними картинками (Instagram/Twitter) иначе валят extract_info
+        # ошибкой «No video formats found»; так мы их разбираем и предлагаем фото.
+        "ignore_no_formats_error": True,
         "noplaylist": True,
         # 30с, а не 20: некоторые сайты (pornhub и пр.) отвечают медленно из
         # дата-центра и делают несколько запросов подряд — на 20с не укладывались.
@@ -445,17 +489,23 @@ def probe(url: str) -> dict:
     # крупные/качественные сверху
     formats.sort(key=lambda x: (x["height"] or 0, x["tbr"] or 0), reverse=True)
 
+    # Пост без видео, но с картинками -> предлагаем скачать фото (галерея).
+    images = collect_images(info)
+    is_gallery = bool(images) and not formats
+
     return {
         "formats": formats,
         "id": info.get("id"),
         "title": info.get("title") or "Без названия",
         "uploader": info.get("uploader") or info.get("channel") or "",
         "duration": duration,
-        "thumbnail": info.get("thumbnail"),
+        "thumbnail": info.get("thumbnail") or (images[0] if images else None),
         "webpage_url": info.get("webpage_url") or url,
         "extractor": info.get("extractor_key") or info.get("extractor"),
         "heights": avail,
         "is_live": is_live,
+        "is_gallery": is_gallery,
+        "image_count": len(images),
     }
 
 
@@ -471,6 +521,7 @@ class Task:
     thumbnail: str | None = None
     bundle: bool = False         # упаковать несколько файлов в один ZIP
     is_live: bool = False        # запись идущего эфира: стоп сохраняет записанное
+    images_mode: bool = False    # скачать фото из поста-галереи (без видео)
     status: str = "queued"       # queued|downloading|processing|finished|error|cancelled
     percent: float | None = None
     speed: float | None = None
@@ -660,12 +711,12 @@ class DownloadManager:
     # ---- запуск задачи ----
     def create(self, url: str, fmt: str, extra: dict, label: str,
                title: str, thumbnail: str | None, bundle: bool = False,
-               is_live: bool = False) -> Task:
+               is_live: bool = False, images_mode: bool = False) -> Task:
         # Идентификатор — единственное, что защищает чужой файл от выдачи,
         # поэтому берём его целиком, а не первые 12 символов.
         task = Task(id=uuid.uuid4().hex, url=url, title=title,
                     fmt=fmt, extra=extra, label=label, thumbnail=thumbnail,
-                    bundle=bundle, is_live=is_live)
+                    bundle=bundle, is_live=is_live, images_mode=images_mode)
         with self.lock:
             if len(self.tasks) >= config.TASKS_MAX:
                 raise Overloaded("too_many_tasks")
@@ -811,56 +862,61 @@ class DownloadManager:
             if task.cancel.is_set():
                 task.status = "cancelled"
                 return
-            fmt, extra = task.fmt, task.extra
-            opts = {
-                "paths": {"home": str(config.DOWNLOAD_DIR)},
-                # Имя на диске задаём сами: только id задачи. Так оно не зависит
-                # от заголовка (кириллица, эмодзи, точки) и не может содержать
-                # разделителей пути. Красивое имя пользователь получает через
-                # download_name при отдаче.
-                "outtmpl": {"default": f"{task.id}.%(ext)s"},
-                "noplaylist": True,
-                "quiet": True,
-                "no_warnings": True,
-                "noprogress": True,      # не писать активность пользователя в лог
-                "consoletitle": False,
-                "socket_timeout": 30,
-                "retries": 5,
-                "concurrent_fragment_downloads": config.CONCURRENT_FRAGMENTS,
-                "logger": _QuietLogger(),
-                **({"proxy": config.PROXY} if config.PROXY else {}),
-                # Эфир пишем в MPEG-TS: такой контейнер остаётся проигрываемым,
-                # даже если запись оборвать на середине (нет moov-атома, как у
-                # mp4). Именно это делает «стоп и сохранить» осмысленным.
-                **({"hls_use_mpegts": True} if task.is_live else {}),
-                "format": fmt,
-                "max_filesize": config.MAX_FILESIZE_MB * 1024 * 1024,
-                "progress_hooks": [self._make_hook(task)],
-                **extra,
-            }
-            with yt_dlp.YoutubeDL(opts) as ydl:
-                info = ydl.extract_info(task.url, download=True)
-                # определить итоговый файл (учёт смены расширения постпроцессором)
-                final = None
-                reqs = (info.get("requested_downloads") or []) if isinstance(info, dict) else []
-                if reqs:
-                    final = reqs[0].get("filepath")
-                if not final:
-                    final = ydl.prepare_filename(info)
-                    # постпроцессор аудио меняет расширение
-                    for pp in task.extra.get("postprocessors") or []:
-                        if pp.get("key") == "FFmpegExtractAudio":
-                            pref = pp.get("preferredcodec")
-                            if pref in (None, "best"):
-                                # «Оригинал» не меняет расширение — угадать
-                                # его нельзя, ищем файл задачи на диске.
-                                found = sorted(
-                                    config.DOWNLOAD_DIR.glob(f"{task.id}.*"))
-                                final = str(found[0]) if found else final
-                            else:
-                                ext = {"aac": "m4a"}.get(pref, pref)
-                                final = os.path.splitext(final)[0] + f".{ext}"
-                            break
+            if task.images_mode:
+                # Пост-галерея (Instagram/Twitter): качаем сами картинки, а не
+                # видео. Несколько -> ZIP через общий bundle ниже.
+                final = self._download_images(task)
+            else:
+                fmt, extra = task.fmt, task.extra
+                opts = {
+                    "paths": {"home": str(config.DOWNLOAD_DIR)},
+                    # Имя на диске задаём сами: только id задачи. Так оно не
+                    # зависит от заголовка (кириллица, эмодзи, точки) и не может
+                    # содержать разделителей пути. Красивое имя пользователь
+                    # получает через download_name при отдаче.
+                    "outtmpl": {"default": f"{task.id}.%(ext)s"},
+                    "noplaylist": True,
+                    "quiet": True,
+                    "no_warnings": True,
+                    "noprogress": True,   # не писать активность пользователя в лог
+                    "consoletitle": False,
+                    "socket_timeout": 30,
+                    "retries": 5,
+                    "concurrent_fragment_downloads": config.CONCURRENT_FRAGMENTS,
+                    "logger": _QuietLogger(),
+                    **({"proxy": config.PROXY} if config.PROXY else {}),
+                    # Эфир пишем в MPEG-TS: такой контейнер остаётся
+                    # проигрываемым, даже если запись оборвать на середине (нет
+                    # moov-атома, как у mp4). Это и делает «стоп и сохранить».
+                    **({"hls_use_mpegts": True} if task.is_live else {}),
+                    "format": fmt,
+                    "max_filesize": config.MAX_FILESIZE_MB * 1024 * 1024,
+                    "progress_hooks": [self._make_hook(task)],
+                    **extra,
+                }
+                with yt_dlp.YoutubeDL(opts) as ydl:
+                    info = ydl.extract_info(task.url, download=True)
+                    # итоговый файл (учёт смены расширения постпроцессором)
+                    final = None
+                    reqs = (info.get("requested_downloads") or []) if isinstance(info, dict) else []
+                    if reqs:
+                        final = reqs[0].get("filepath")
+                    if not final:
+                        final = ydl.prepare_filename(info)
+                        # постпроцессор аудио меняет расширение
+                        for pp in task.extra.get("postprocessors") or []:
+                            if pp.get("key") == "FFmpegExtractAudio":
+                                pref = pp.get("preferredcodec")
+                                if pref in (None, "best"):
+                                    # «Оригинал» не меняет расширение — угадать
+                                    # его нельзя, ищем файл задачи на диске.
+                                    found = sorted(
+                                        config.DOWNLOAD_DIR.glob(f"{task.id}.*"))
+                                    final = str(found[0]) if found else final
+                                else:
+                                    ext = {"aac": "m4a"}.get(pref, pref)
+                                    final = os.path.splitext(final)[0] + f".{ext}"
+                                break
             if task.cancel.is_set():
                 task.status = "cancelled"
                 self._cleanup_partials(task)
@@ -932,6 +988,62 @@ class DownloadManager:
                     self.on_complete(task)
                 except Exception:      # статистика не должна ломать загрузку
                     pass
+
+    def _download_images(self, task: Task) -> str | None:
+        """Скачать картинки поста-галереи напрямую (Instagram/Twitter и т.п.).
+
+        Возвращает путь к первому файлу; если картинок несколько, общий bundle
+        ниже упакует их в ZIP. Адреса берём заново из yt-dlp (доверенный
+        источник), а не от клиента.
+        """
+        task.status = "downloading"
+        opts = {
+            "quiet": True, "no_warnings": True, "skip_download": True,
+            "ignore_no_formats_error": True, "socket_timeout": 30,
+            "logger": _QuietLogger(),
+            **({"proxy": config.PROXY} if config.PROXY else {}),
+        }
+        with yt_dlp.YoutubeDL(opts) as ydl:
+            info = ydl.sanitize_info(ydl.extract_info(task.url, download=False))
+        urls = collect_images(info)
+        if not urls:
+            task.error = "В посте не найдено изображений"
+            return None
+        from curl_cffi import requests as _cffi   # импортируется лениво
+        total = saved = 0
+        for i, u in enumerate(urls, 1):
+            if task.cancel.is_set():
+                raise yt_dlp.utils.DownloadCancelled()
+            try:
+                r = _cffi.get(u, impersonate="chrome", timeout=30)
+            except Exception:
+                continue
+            if getattr(r, "status_code", 0) != 200:
+                continue
+            data = r.content or b""
+            if not data:
+                continue
+            total += len(data)
+            if total > config.MAX_FILESIZE_MB * 1048576:
+                task.error = "Файлы превышают допустимый размер"
+                task.cancel.set()
+                raise yt_dlp.utils.DownloadCancelled()
+            ext = _img_ext(r.headers.get("content-type"), u)
+            # номер с ведущим нулём -> файлы сортируются по порядку карусели
+            p = config.DOWNLOAD_DIR / f"{task.id}.{i:02d}.{ext}"
+            try:
+                p.write_bytes(data)
+                saved += 1
+            except OSError:
+                pass
+            task.percent = round(i / len(urls) * 100, 1)
+        if saved == 0:
+            task.error = task.error or "Не удалось скачать изображения"
+            return None
+        task.bundle = saved > 1
+        task.status = "processing"
+        files = sorted(config.DOWNLOAD_DIR.glob(f"{task.id}.*"))
+        return str(files[0]) if files else None
 
     def _bundle_outputs(self, task: Task) -> str | None:
         """Собрать все файлы задачи в один ZIP, если их больше одного.

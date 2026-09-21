@@ -389,6 +389,7 @@ select.input{height:40px; font-size:14px; border-radius:var(--r-md); padding:0 v
 .live-badge{display:inline-block; margin-right:6px; padding:2px 8px; border-radius:999px;
   background:color-mix(in srgb, #ef4444 18%, transparent); color:#ef4444;
   font-weight:600; font-size:11px; white-space:nowrap}
+.live-badge--img{background:var(--accent-soft); color:var(--accent)}
 
 /* Чекбоксы постобработки */
 .pp-opts{display:flex; flex-wrap:wrap; gap:var(--s-2)}
