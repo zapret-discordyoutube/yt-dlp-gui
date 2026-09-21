@@ -273,6 +273,15 @@ def api_download():
         fmt, extra, feat_label, bundle = dl.apply_features(fmt, extra, features, kind_for_feat)
         if feat_label:
             label = f"{label} · {feat_label}"
+        # Отрезок «с X по Y»: качаем только нужный кусок.
+        try:
+            clip, clip_label = dl.clip_extra(
+                str(data.get("clip_from", "")), str(data.get("clip_to", "")))
+        except ValueError:
+            return err("Неверный отрезок: конец должен быть больше начала")
+        if clip:
+            extra = {**extra, **clip}
+            label = f"{label} · ✂ {clip_label}"
 
     title = str(data.get("title") or "Видео")[:200]
     thumb = data.get("thumbnail")
