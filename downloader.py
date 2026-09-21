@@ -73,7 +73,17 @@ def build_format(kind: str, height: str = "auto", acodec: str = "best",
         pp = {"key": "FFmpegExtractAudio", "preferredcodec": pref}
         if pref != "best":
             pp["preferredquality"] = "192"
-        return "bestaudio/best", {"postprocessors": [pp]}, label
+
+        # Берём исходную дорожку в том же кодеке, что и цель: тогда
+        # FFmpegExtractAudio просто скопирует поток вместо перекодирования.
+        # Без этого выбор AAC приводил к пережатию Opus-дорожки впустую —
+        # это и потеря качества, и минуты ожидания на длинном ролике.
+        # Для MP3 копирование невозможно: источники его не отдают.
+        prefer = {
+            "aac":  "bestaudio[acodec^=mp4a]/bestaudio/best",
+            "opus": "bestaudio[acodec^=opus]/bestaudio/best",
+        }.get(acodec, "bestaudio/best")
+        return prefer, {"postprocessors": [pp]}, label
 
     if kind == "video":
         if vcodec not in _VCODECS:
@@ -190,6 +200,7 @@ def probe(url: str) -> dict:
         "skip_download": True,
         "noplaylist": True,
         "socket_timeout": 20,
+        **({"proxy": config.PROXY} if config.PROXY else {}),
     }
     with yt_dlp.YoutubeDL(opts) as ydl:
         info = ydl.sanitize_info(ydl.extract_info(url, download=False))
@@ -516,6 +527,7 @@ class DownloadManager:
                 "socket_timeout": 30,
                 "retries": 5,
                 "concurrent_fragment_downloads": config.CONCURRENT_FRAGMENTS,
+                **({"proxy": config.PROXY} if config.PROXY else {}),
                 "format": fmt,
                 "max_filesize": config.MAX_FILESIZE_MB * 1024 * 1024,
                 "progress_hooks": [self._make_hook(task)],
@@ -603,9 +615,25 @@ def _clean_err(msg: str) -> str:
     """
     msg = re.sub(r"\x1b\[[0-9;]*m", "", msg)                 # ANSI
     msg = msg.replace("ERROR:", "").strip()
-    msg = re.sub(r"(/[\w.\-]+){2,}", "<путь>", msg)          # пути на диске
+    # Только пути в файловой системе. Общая регулярка на «слэши» съедала
+    # путь внутри URL и превращала ссылку пользователя в «https:/<путь>»,
+    # делая сообщение бесполезным.
+    msg = re.sub(r"(?<![\w/:])/(?:home|root|tmp|var|etc|usr|opt|srv|proc)"
+                 r"(?:/[\w.\-]+)*", "<путь>", msg)
     msg = re.sub(r"\b\d{1,3}(\.\d{1,3}){3}\b", "<адрес>", msg)   # IPv4
     msg = re.sub(r"\b(?:127\.0\.0\.1|localhost)(?::\d+)?\b", "<адрес>", msg)
+
+    # Самая частая ошибка — ссылка, для которой у yt-dlp нет экстрактора
+    # (например, аудио ВКонтакте). Сырая формулировка ничего не объясняет.
+    if "Unsupported URL" in msg:
+        return ("Этот сайт или тип ссылки не поддерживается. "
+                "Проверьте, что это страница видео, а не аудио или плейлиста.")
+    if "Private video" in msg or "private" in msg.lower():
+        return "Это приватное видео — доступ к нему закрыт"
+    if "Video unavailable" in msg:
+        return "Видео недоступно"
+    if "age" in msg.lower() and "restrict" in msg.lower():
+        return "Видео с возрастным ограничением — скачать нельзя"
     return msg[:300] if msg else "Ошибка скачивания"
 
 

@@ -109,12 +109,16 @@
           <div class="field">
             <label for="sel-acodec">Кодек</label>
             <select class="input" id="sel-acodec">
-              <option value="best">Оригинал — без перекодирования</option>
-              <option value="mp3">MP3 — совместимость</option>
-              <option value="aac">AAC — качество/размер</option>
-              <option value="opus">Opus — лучшее сжатие</option>
+              <option value="best">Оригинал — мгновенно, без потерь</option>
+              <option value="aac">AAC — обычно без перекодирования</option>
+              <option value="opus">Opus — обычно без перекодирования</option>
+              <option value="mp3">MP3 — совместимость, но медленно</option>
             </select>
           </div>
+          <p class="meta" style="flex-basis:100%; margin:0">
+            MP3 источники не отдают, поэтому его приходится кодировать заново —
+            на длинном ролике это займёт минуты. Остальные варианты копируют дорожку как есть.
+          </p>
         </div>
 
         <!-- Все форматы -->

@@ -52,6 +52,30 @@ RestrictSUIDSGID=yes
 RestrictNamespaces=yes
 LockPersonality=yes
 
+# --- Запрет исходящих во внутреннюю сеть ---
+# Проверка адреса в приложении принципиально не закрывает DNS rebinding
+# (yt-dlp резолвит имя заново и сам ходит по редиректам), поэтому запрет
+# ставится на уровне ядра. Хост — гипервизор: во внутренней сети живут
+# его API и виртуальные машины.
+IPAddressAllow=any
+IPAddressDeny=127.0.0.0/8
+IPAddressDeny=10.0.0.0/8
+IPAddressDeny=172.16.0.0/12
+IPAddressDeny=192.168.0.0/16
+IPAddressDeny=169.254.0.0/16
+IPAddressDeny=100.64.0.0/10
+IPAddressDeny=::1/128
+IPAddressDeny=fc00::/7
+IPAddressDeny=fe80::/10
+IPAddressDeny=::ffff:0:0/96
+
+# --- Ресурсы хоста ---
+# Сервис делит гипервизор с виртуальными машинами: ffmpeg при
+# перекодировании иначе забирает все ядра у соседей.
+CPUWeight=20
+IOWeight=20
+Nice=10
+
 # --- Лимиты ресурсов ---
 MemoryMax=2G
 TasksMax=256

@@ -25,6 +25,12 @@ TASKS_MAX = int(os.environ.get("YTG_TASKS_MAX", "500"))
 # задержку до сервера, а не в канал. Держим умеренным: значение умножается
 # на число одновременных загрузок, а хост — гипервизор.
 CONCURRENT_FRAGMENTS = int(os.environ.get("YTG_CONCURRENT_FRAGMENTS", "5"))
+
+# Прокси для исходящих запросов yt-dlp (socks5://host:port или http://...).
+# Задаётся ТОЛЬКО администратором через окружение и никогда не принимается
+# от пользователя: произвольный прокси — это готовый SSRF.
+# Нужен там, где сайт недоступен напрямую из сети хоста.
+PROXY = os.environ.get("YTG_PROXY", "").strip()
 MAX_FILESIZE_MB = int(os.environ.get("YTG_MAX_FILESIZE_MB", "2048"))   # потолок на один файл
 MAX_DURATION_SEC = int(os.environ.get("YTG_MAX_DURATION_SEC", str(4 * 3600)))  # 4 часа
 DISK_QUOTA_MB = int(os.environ.get("YTG_DISK_QUOTA_MB", "5120"))       # 5 ГБ на всю папку
