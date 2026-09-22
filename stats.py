@@ -1,9 +1,11 @@
 """Обезличенная статистика использования.
 
-Храним три вида записей и ничего больше:
+Храним четыре вида записей и ничего больше:
  * суточные счётчики (запросы, загрузки, отданные байты);
  * ленту скачанного: адрес ролика, первая и последняя даты, счётчик;
- * времена отдельных скачиваний, ОКРУГЛЁННЫЕ ДО МИНУТЫ.
+ * времена отдельных скачиваний, ОКРУГЛЁННЫЕ ДО МИНУТЫ;
+ * замеры производительности загрузок (perf): домен сайта и числа, без
+   адреса ролика, 30 дней — диагностика скорости (см. perf_report.py).
 
 Ни IP, ни User-Agent, ни заголовков, ни сессий. Округление времени —
 не косметика: при небольшом трафике точная метка однозначно выделяет
@@ -69,7 +71,34 @@ CREATE TABLE IF NOT EXISTS meta (
 
 CREATE INDEX IF NOT EXISTS events_url ON events(url, at DESC);
 CREATE INDEX IF NOT EXISTS events_at  ON events(at);
+
+-- Производительность загрузок: только домен сайта и числа. Ни адреса
+-- ролика, ни IP; время — до минуты, как и у событий. Хранится недолго
+-- (PERF_RETENTION_DAYS) — это инструмент диагностики, а не журнал.
+CREATE TABLE IF NOT EXISTS perf (
+    id          INTEGER PRIMARY KEY AUTOINCREMENT,
+    at          TEXT NOT NULL,
+    site        TEXT NOT NULL,
+    outcome     TEXT NOT NULL,       -- finished | error | cancelled
+    error_kind  TEXT,                -- категория ошибки, не текст
+    engine      TEXT,                -- racefd | ytdlp | images
+    bytes       INTEGER,
+    queue_ms    INTEGER,             -- ожидание свободного слота
+    prepare_ms  INTEGER,             -- от запуска до первого байта
+    download_ms INTEGER,
+    process_ms  INTEGER,             -- склейка / MP3 / обрезка
+    total_ms    INTEGER,
+    avg_speed   INTEGER,             -- байт/с за время скачивания
+    mirrors     INTEGER,             -- сколько видеосерверов понадобилось
+    conn_ok     INTEGER,
+    conn_fail   INTEGER              -- соединений, не пробившихся через DPI
+);
+CREATE INDEX IF NOT EXISTS perf_at ON perf(at);
 """
+
+_PERF_COLS = ("error_kind", "engine", "bytes", "queue_ms", "prepare_ms",
+              "download_ms", "process_ms", "total_ms", "avg_speed",
+              "mirrors", "conn_ok", "conn_fail")
 
 
 _conn: sqlite3.Connection | None = None
@@ -276,6 +305,103 @@ def prune_events() -> int:
             return cur.rowcount or 0
     except sqlite3.Error:
         return 0
+
+
+def error_kind(msg: str | None) -> str | None:
+    """Категория ошибки для метрик. Сам текст не храним: в нём бывает
+    идентификатор ролика и прочие подробности."""
+    if not msg:
+        return None
+    m = msg.lower()
+    for key, words in (("stall", ("перестал отдавать",)),
+                       ("size", ("превышает", "размер")),
+                       ("disk", ("места",)),
+                       ("unsupported", ("не поддерживается",)),
+                       ("unavailable", ("недоступно", "приватное", "возрастным")),
+                       ("internal", ("внутренняя",)),
+                       ("http403", ("403",)),
+                       ("postprocess", ("postprocessing", "conversion"))):
+        if any(w in m for w in words):
+            return key
+    return "other"
+
+
+def record_perf(site: str, outcome: str, metrics: dict,
+                error: str | None = None, size: int | None = None) -> None:
+    """Записать метрики одной загрузки. Ошибки БД глотаем: статистика не
+    должна мешать загрузкам."""
+    now = datetime.now(timezone.utc).isoformat()[:16] + ":00+00:00"
+    row = {k: metrics.get(k) for k in _PERF_COLS}
+    row["error_kind"] = error_kind(error) if outcome == "error" else None
+    row["bytes"] = size
+    cols = ("at", "site", "outcome") + _PERF_COLS
+    vals = (now, (site or "?")[:100], outcome) + tuple(row[k] for k in _PERF_COLS)
+    try:
+        with _lock, _connect() as conn:
+            conn.execute(f"INSERT INTO perf({', '.join(cols)}) "
+                         f"VALUES ({', '.join('?' * len(cols))})", vals)
+    except sqlite3.Error:
+        pass
+
+
+def prune_perf() -> int:
+    if config.PERF_RETENTION_DAYS <= 0:
+        return 0
+    cutoff = (datetime.now(timezone.utc)
+              - timedelta(days=config.PERF_RETENTION_DAYS)).isoformat()
+    try:
+        with _lock, _connect() as conn:
+            return conn.execute("DELETE FROM perf WHERE at < ?", (cutoff,)).rowcount or 0
+    except sqlite3.Error:
+        return 0
+
+
+def perf_report(hours: int = 24) -> dict:
+    """Сводка производительности за последние `hours` часов: по сайтам
+    и движкам — число загрузок, исходы, медианы и хвосты таймингов."""
+    since = (datetime.now(timezone.utc) - timedelta(hours=hours)).isoformat()
+    with _lock, _connect() as conn:
+        conn.row_factory = sqlite3.Row
+        try:
+            rows = [dict(r) for r in conn.execute(
+                "SELECT * FROM perf WHERE at >= ? ORDER BY at", (since,))]
+        finally:
+            conn.row_factory = None
+
+    def pct(vals, q):
+        vals = sorted(v for v in vals if v is not None)
+        if not vals:
+            return None
+        return vals[min(len(vals) - 1, int(q * len(vals)))]
+
+    groups: dict[tuple, list] = {}
+    for r in rows:
+        site = "youtube" if "youtube" in r["site"] or "youtu.be" in r["site"] else r["site"]
+        groups.setdefault((site, r["engine"] or "-"), []).append(r)
+    out = []
+    for (site, engine), rs in sorted(groups.items(), key=lambda kv: -len(kv[1])):
+        fin = [r for r in rs if r["outcome"] == "finished"]
+        speeds = [r["avg_speed"] for r in fin]
+        out.append({
+            "site": site, "engine": engine, "count": len(rs),
+            "finished": len(fin),
+            "errors": sum(r["outcome"] == "error" for r in rs),
+            "cancelled": sum(r["outcome"] == "cancelled" for r in rs),
+            "error_kinds": {k: sum(r["error_kind"] == k for r in rs)
+                            for k in {r["error_kind"] for r in rs if r["error_kind"]}},
+            "prepare_ms_p50": pct([r["prepare_ms"] for r in rs], .5),
+            "prepare_ms_p90": pct([r["prepare_ms"] for r in rs], .9),
+            "speed_p10": pct(speeds, .1), "speed_p50": pct(speeds, .5),
+            "slow_under_2mb": sum(1 for v in speeds if v is not None and v < 2 << 20),
+            "total_ms_p50": pct([r["total_ms"] for r in fin], .5),
+            "total_ms_p90": pct([r["total_ms"] for r in fin], .9),
+            "queue_ms_p90": pct([r["queue_ms"] for r in rs], .9),
+            "mirror_switches": sum(1 for r in rs if (r["mirrors"] or 1) > 1),
+            "conn_fail_share": (round(sum(r["conn_fail"] or 0 for r in rs)
+                                      / max(1, sum((r["conn_fail"] or 0) + (r["conn_ok"] or 0)
+                                                   for r in rs)), 3)),
+        })
+    return {"hours": hours, "rows": len(rows), "groups": out}
 
 
 def selftest() -> None:

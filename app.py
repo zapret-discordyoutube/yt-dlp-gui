@@ -48,6 +48,11 @@ def _task_finished(task) -> None:
         stats.record_download(dl.canonical_url(task.url))
     elif task.status == "error":
         stats.bump("downloads_failed")
+    # Производительность — по всем исходам, включая отмену: только домен и
+    # числа, без ссылки.
+    if task.status in ("finished", "error", "cancelled"):
+        stats.record_perf(dl._host_of(task.url).removeprefix("www."), task.status,
+                          task.metrics, error=task.error, size=task.filesize)
 
 
 manager.on_complete = _task_finished
@@ -59,6 +64,7 @@ def _prune_events_loop() -> None:
     while True:
         try:
             removed = stats.prune_events()
+            removed += stats.prune_perf()
             gone_feed, gone_daily = stats.prune_feed_and_daily()
             if removed or gone_feed or gone_daily:
                 logging.info("очистка: событий %d, записей ленты %d, суток %d",
