@@ -35,6 +35,12 @@ WORKERS_BIG = 16         # на большой файл (4K и т.п.)
 BIG_FILE = 64 << 20      # от какого размера файл «большой»
 CONNECT_TIMEOUT = 3      # TCP+TLS: повисшее рукопожатие бросаем
 MAX_BACKOFF = 2.0        # пауза перед новой попыткой после неудачи
+# Смена сервера. DPI режет по IP конкретного видеосервера: к одному новые
+# соединения не пускает, к другому в тот же момент пускает все. Повторный
+# разбор ролика обычно выдаёт ссылку на тот же файл на другом сервере.
+ALIVE_WINDOW = 10        # соединение «живое», если отдало кусок за это время, с
+RESOLVE_EVERY = 8        # не чаще, чем раз в столько секунд
+MAX_MIRRORS = 6          # сколько серверов держать для одного файла
 READ_TIMEOUT = 15        # полная тишина внутри ответа
 MAX_FAILS = 400          # подряд неудач у всех соединений -> ошибка (обычно раньше снимет сторож менеджера)
 
@@ -97,8 +103,12 @@ def suitable(info: dict, params: dict) -> bool:
 
 class RaceFD(FileDownloader):
     def real_download(self, filename, info_dict):
-        url = info_dict["url"]
         size = _size_of(info_dict)
+        # Зеркала: ссылки на ЭТОТ ЖЕ файл (тот же формат и размер) на разных
+        # серверах. [url, удачи, неудачи]. Куски — байтовые диапазоны одного
+        # файла, поэтому их можно брать с любого зеркала вперемешку.
+        mirrors: list[list] = [[info_dict["url"], 0, 0]]
+        alive: dict[int, float] = {}             # поток -> время последней удачи
         headers = dict(info_dict.get("http_headers") or {})
         tmp = self.temp_name(filename)
         self.report_destination(filename)
@@ -132,8 +142,15 @@ class RaceFD(FileDownloader):
                 left = [c for c in inflight if c not in finished]
                 return min(left, key=lambda c: inflight[c]) if left else -1
 
-        def worker(slot: _Slot):
+        def best_mirror() -> int:
+            """Зеркало с лучшим счётом; новое (без истории) — в приоритете."""
+            with lock:
+                return max(range(len(mirrors)),
+                           key=lambda m: (mirrors[m][1] + 1) / (mirrors[m][2] + 1) + m * 0.01)
+
+        def worker(slot: _Slot, wid: int):
             backoff = 0.0
+            m = 0
             try:
                 while not stop.is_set():
                     i = next_chunk()
@@ -147,7 +164,7 @@ class RaceFD(FileDownloader):
                     end = min(size, start + CHUNK) - 1
                     try:
                         r = slot.session.get(
-                            url, headers={**headers, "Range": f"bytes={start}-{end}"},
+                            mirrors[m][0], headers={**headers, "Range": f"bytes={start}-{end}"},
                             timeout=(CONNECT_TIMEOUT, READ_TIMEOUT), stream=True)
                         if r.status_code not in (200, 206):
                             r.close()
@@ -165,6 +182,8 @@ class RaceFD(FileDownloader):
                             pos += len(block)
                         with lock:
                             fails[0] = 0
+                            mirrors[m][1] += 1
+                            alive[wid] = time.monotonic()
                             if i not in finished and pos == end + 1:
                                 finished.add(i)
                                 got[0] += end - start + 1
@@ -174,11 +193,13 @@ class RaceFD(FileDownloader):
                     except Exception:                         # noqa: BLE001
                         with lock:
                             fails[0] += 1
+                            mirrors[m][2] += 1
                             if fails[0] >= MAX_FAILS:
                                 stop.set()
                             if i not in finished:
                                 todo.put(i)
                         slot.renew()
+                        m = best_mirror()                 # новое соединение — к лучшему серверу
                         # Короткая пауза: DPI то пускает новые соединения,
                         # то нет, и долгое ожидание (раньше до 8 с) оставляло
                         # большинство потоков простаивать, когда он снова
@@ -194,7 +215,24 @@ class RaceFD(FileDownloader):
                 slot.busy = False
 
         slots = _take_slots(WORKERS_BIG if size >= BIG_FILE else WORKERS)
-        threads = [threading.Thread(target=worker, args=(s,), daemon=True) for s in slots]
+        threads = [threading.Thread(target=worker, args=(s, n), daemon=True)
+                   for n, s in enumerate(slots)]
+        resolving = threading.Event()
+        # Первый поиск запасного сервера — сразу, если соединения не поднялись.
+        last_resolve = [time.monotonic() - RESOLVE_EVERY]
+
+        def resolve():
+            """Повторно разобрать ролик и добавить зеркало на другом сервере."""
+            try:
+                new = _fresh_url(info_dict, size)
+                if new:
+                    host = urlparse(new).netloc
+                    with lock:
+                        if all(urlparse(x[0]).netloc != host for x in mirrors):
+                            mirrors.append([new, 0, 0])
+            finally:
+                last_resolve[0] = time.monotonic()
+                resolving.clear()
         started = time.time()
         for t in threads:
             t.start()
@@ -206,6 +244,17 @@ class RaceFD(FileDownloader):
                     done_now, all_done = got[0], len(finished) == n_chunks
                 if all_done or stop.is_set():
                     break
+                # Живых соединений мало — сервер, скорее всего, под DPI:
+                # в фоне ищем тот же файл на другом сервере (то же, что даёт
+                # ручной перезапуск загрузки).
+                mono = time.monotonic()
+                with lock:
+                    n_alive = sum(1 for t in alive.values() if mono - t < ALIVE_WINDOW)
+                if (n_alive < len(slots) // 2 and not resolving.is_set()
+                        and mono - last_resolve[0] > RESOLVE_EVERY
+                        and len(mirrors) < MAX_MIRRORS):
+                    resolving.set()
+                    threading.Thread(target=resolve, daemon=True).start()
                 now = time.time()
                 if done_now == last_b:
                     continue       # без новых байт хук не зовём: менеджер видит простой
@@ -237,6 +286,32 @@ class RaceFD(FileDownloader):
             "elapsed": time.time() - started,
         }, info_dict)
         return True
+
+
+def _fresh_url(info: dict, size: int) -> str | None:
+    """Новая ссылка на тот же формат: повторный разбор страницы ролика.
+    Принимаем только файл того же размера — иначе это другой файл."""
+    import yt_dlp
+    page = info.get("webpage_url") or info.get("original_url")
+    fid = info.get("format_id")
+    if not page or not fid:
+        return None
+
+    class _Quiet:
+        def debug(self, msg): pass
+        info = warning = error = debug
+
+    try:
+        with yt_dlp.YoutubeDL({"quiet": True, "no_warnings": True, "logger": _Quiet(),
+                               "socket_timeout": 15}) as ydl:
+            data = ydl.extract_info(page, download=False, process=False)
+            data = ydl.sanitize_info(data)
+    except Exception:                                   # noqa: BLE001
+        return None
+    for f in data.get("formats") or []:
+        if f.get("format_id") == fid and f.get("url") and _size_of(f) == size:
+            return f["url"]
+    return None
 
 
 def install() -> None:
