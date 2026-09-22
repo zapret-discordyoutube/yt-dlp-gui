@@ -60,7 +60,7 @@ NEUTRAL_MBPS = 2.0
 # Провайдер режет каждое соединение до узла (~300 КБ/с), поэтому у каждого
 # потока свой туннель. Ссылку для этого пути получаем разбором ЧЕРЕЗ egress:
 # YouTube привязывает ссылку к IP, с которого её запросили.
-EGRESS_AFTER = 6         # сколько ждать первого байта напрямую, с
+EGRESS_AFTER = 3         # сколько ждать первого байта напрямую, с
 EGRESS_NEUTRAL_MBPS = 1.0  # оценка egress-пути до замеров: ниже прямого
 READ_TIMEOUT = 15        # полная тишина внутри ответа
 MAX_FAILS = 400          # подряд неудач у всех соединений -> ошибка (обычно раньше снимет сторож менеджера)
@@ -489,12 +489,21 @@ class RaceFD(FileDownloader):
             finally:
                 last_resolve[0] = time.monotonic()
                 resolving.clear()
-        egress_state = {"started": any(x[3] for x in mirrors), "running": False}
+        egress_state = {"started": any(x[3] for x in mirrors), "running": False,
+                        "prefetched": None}
+
+        def prefetch_egress():
+            """Ссылку для egress готовим заранее, в фоне: если прямой путь не
+            пойдёт, переключение мгновенное, без разбора ролика в этот момент."""
+            try:
+                egress_state["prefetched"] = _fresh_url(info_dict, size, proxy=pool[0])
+            except Exception:                    # noqa: BLE001
+                pass
 
         def resolve_egress():
             """Ссылка на тот же формат, полученная разбором ЧЕРЕЗ egress."""
             try:
-                new = _fresh_url(info_dict, size, proxy=pool[0])
+                new = egress_state["prefetched"] or _fresh_url(info_dict, size, proxy=pool[0])
                 if new:
                     with lock:
                         mirrors.append([new, 0, 0, "egress"])
@@ -502,6 +511,16 @@ class RaceFD(FileDownloader):
                             STATS["mirrors"] = max(STATS["mirrors"], len(mirrors))
             finally:
                 egress_state["running"] = False
+
+        def maybe_prefetch(now_bytes: int) -> None:
+            """Готовим egress-ссылку заранее — но не на каждый файл (лишние
+            запросы к YouTube с IP узла): сразу, если сервер уже в бане, или
+            если за секунду не пришло ни байта."""
+            if (not pool or egress_state["started"] or egress_state.get("pf_started")):
+                return
+            if _m_banned(mirrors[0]) or (now_bytes == 0 and time.time() - started > 1):
+                egress_state["pf_started"] = True
+                threading.Thread(target=prefetch_egress, daemon=True).start()
 
         started = time.time()
         phase = [None]
@@ -538,6 +557,7 @@ class RaceFD(FileDownloader):
                         and len(mirrors) < MAX_MIRRORS):
                     resolving.set()
                     threading.Thread(target=resolve, daemon=True).start()
+                maybe_prefetch(done_now)
                 # Запасной путь через egress: все прямые серверы в бане или
                 # долго нет ни одного живого соединения. Прямые попытки при
                 # этом продолжаются — кто первый отдаст, тот и качает.

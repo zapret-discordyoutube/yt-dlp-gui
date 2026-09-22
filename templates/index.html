@@ -750,6 +750,7 @@ $("#download-btn").addEventListener("click", async () => {
     const task = await readJson(r).catch(() => ({}));
     if (!r.ok) throw new Error(task.error || httpMessage(r.status));
     addTask(task);
+    rememberTask(task);
     watchTask(task.id);
     toast("Загрузка началась");
   } catch (e) {
@@ -761,6 +762,29 @@ $("#download-btn").addEventListener("click", async () => {
 
 /* ---------- Карточки задач + SSE ---------- */
 const tasks = new Map();
+
+/* Активные загрузки переживают перезагрузку страницы: их id лежат в этом
+   браузере, и после перезагрузки карточки восстанавливаются и снова следят
+   за прогрессом. Раньше перезагрузка «теряла» загрузку — и в историю она
+   не попадала, хотя файл на сервере был готов. */
+const LS_ACTIVE = "ytgrab.active.v1";
+function rememberTask(t) {
+  const list = store.get(LS_ACTIVE, []).filter(x => x && x.id !== t.id);
+  list.unshift({ id: t.id, title: t.title, label: t.label, url: t.url,
+                 thumbnail: t.thumbnail, is_live: !!t.is_live });
+  store.set(LS_ACTIVE, list.slice(0, 10));
+}
+function forgetTask(id) {
+  store.set(LS_ACTIVE, store.get(LS_ACTIVE, []).filter(x => x && x.id !== id));
+}
+function restoreTasks() {
+  const list = store.get(LS_ACTIVE, []).filter(x => x && /^[0-9a-f]{32}$/.test(x.id || ""));
+  list.slice().reverse().forEach(t => {
+    if (document.getElementById("task-" + t.id)) return;
+    addTask(t);
+    watchTask(t.id);
+  });
+}
 
 function addTask(t) {
   tasks.set(t.id, t);
@@ -801,10 +825,11 @@ function watchTask(id) {
   es.onmessage = (ev) => {
     retries = 0;          // поток снова живой — счётчик неудач обнуляем
     let t; try { t = JSON.parse(ev.data); } catch { return; }
-    if (t.status === "gone") { es.close(); markLost(id, "Задача не найдена — возможно, сервер перезапускался"); return; }
+    if (t.status === "gone") { es.close(); forgetTask(id); markLost(id, "Задача не найдена — возможно, сервер перезапускался"); return; }
     renderTask(t);
-    if (["finished","error","cancelled"].includes(t.status)) {
+    if (["finished","error","cancelled","served"].includes(t.status)) {
       es.close();
+      forgetTask(id);
       if (t.status === "finished") { addHistory(t); toast("Готово: " + t.title, "success"); }
       else if (t.status === "error") toast("Ошибка: " + (t.error || ""), "error");
     }
@@ -927,7 +952,8 @@ function updateCount() {
 /* ---------- История (только localStorage) ---------- */
 function addHistory(t) {
   const hist = store.get(LS_HISTORY, []);
-  hist.unshift({ title: t.title, label: t.label, filename: t.filename,
+  if (t.id && hist.some(h => h.id === t.id)) return;   // уже записана
+  hist.unshift({ id: t.id, title: t.title, label: t.label, filename: t.filename,
                  filesize: t.filesize, url: t.url, at: Date.now() });
   store.set(LS_HISTORY, hist.slice(0, 50));
   renderHistory();
@@ -976,6 +1002,7 @@ $("#clear-history").addEventListener("click", () => {
 });
 
 renderHistory();
+restoreTasks();
 updateCount();
 </script>
 </body>
