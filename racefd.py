@@ -26,8 +26,13 @@ import threading
 import time
 from urllib.parse import urlparse
 
+import socket
+
 import requests
 from yt_dlp.downloader.common import FileDownloader
+
+import config
+import hostban
 
 CHUNK = 1 << 20          # 1 МиБ на запрос
 WORKERS = 12             # соединений на файл
@@ -39,8 +44,12 @@ MAX_BACKOFF = 2.0        # пауза перед новой попыткой п�
 # соединения не пускает, к другому в тот же момент пускает все. Повторный
 # разбор ролика обычно выдаёт ссылку на тот же файл на другом сервере.
 ALIVE_WINDOW = 10        # соединение «живое», если отдало кусок за это время, с
-RESOLVE_EVERY = 8        # не чаще, чем раз в столько секунд
+RESOLVE_EVERY = 4        # не чаще, чем раз в столько секунд
+RESOLVE_PARALLEL = 3     # параллельных разборов за раунд: YouTube часто
+                         # выдаёт тот же сервер, а 3 разом дают разные
 MAX_MIRRORS = 6          # сколько серверов держать для одного файла
+BAN_WAIT = 6             # сколько ждать запасной сервер, прежде чем всё же
+                         # постучаться в заблокированный, с
 READ_TIMEOUT = 15        # полная тишина внутри ответа
 MAX_FAILS = 400          # подряд неудач у всех соединений -> ошибка (обычно раньше снимет сторож менеджера)
 
@@ -61,8 +70,66 @@ class _Slot:
         self.session = requests.Session()
 
 
+# Знания о серверах — на весь процесс (= на задачу), общие для всех дорожек:
+# счёт удач/неудач по серверу и найденные ссылки на каждый формат на других
+# серверах. Звуковая дорожка сразу знает, что сервер видео заблокирован, и
+# берёт готовую ссылку, найденную при разборе ради видео.
+_HOSTS: dict[str, list[int]] = {}                 # netloc -> [удачи, неудачи]
+_ALT: dict[tuple, dict[str, str]] = {}            # (страница, формат, размер) -> {netloc: url}
+_mirror_lock = threading.Lock()
+
+
+_ips: dict[str, str | None] = {}
+
+
+def _ip_of(url: str) -> str | None:
+    """IP сервера из ссылки (кэш: у rr-хостов адрес один)."""
+    host = urlparse(url).hostname or ""
+    if host not in _ips:
+        try:
+            _ips[host] = socket.getaddrinfo(host, 443, socket.AF_INET,
+                                            socket.SOCK_STREAM)[0][4][0]
+        except OSError:
+            _ips[host] = None
+    return _ips[host]
+
+
+def _is_banned(url: str) -> bool:
+    return hostban.is_banned(_ip_of(url))
+
+
+def _host_note(url: str, ok: bool) -> None:
+    """Учесть исход соединения. Сервер, к которому подряд не прошло ни одно
+    соединение, уходит в общий список заблокированных (hostban) — его будут
+    обходить все загрузки; удача снимает его оттуда."""
+    with _mirror_lock:
+        h = _HOSTS.setdefault(urlparse(url).netloc, [0, 0])
+        h[0 if ok else 1] += 1
+        ok_n, fail_n = h
+    ip = _ip_of(url)
+    if ok:
+        if hostban.is_banned(ip):
+            hostban.clear(ip)
+    elif ok_n == 0 and fail_n >= config.BAN_FAILS and not hostban.is_banned(ip):
+        hostban.ban(ip)
+        _count("banned")
+
+
+def _host_score(url: str) -> float:
+    if _is_banned(url):
+        return -1.0                               # заблокирован — в самый конец
+    with _mirror_lock:
+        ok, fail = _HOSTS.get(urlparse(url).netloc, (0, 0))
+    return (ok + 1) / (fail + 1)
+
+
+def _alt_key(info: dict, size: int) -> tuple:
+    return (info.get("webpage_url") or info.get("original_url"), info.get("format_id"), size)
+
+
 # Счётчики за процесс (= за одну задачу): уходят в метрики производительности.
-STATS = {"files": 0, "conn_ok": 0, "conn_fail": 0, "mirrors": 1}
+STATS = {"files": 0, "conn_ok": 0, "conn_fail": 0, "mirrors": 1,
+         "banned": 0, "avoided": 0}
 _stats_lock = threading.Lock()
 
 
@@ -119,6 +186,12 @@ class RaceFD(FileDownloader):
         # серверах. [url, удачи, неудачи]. Куски — байтовые диапазоны одного
         # файла, поэтому их можно брать с любого зеркала вперемешку.
         mirrors: list[list] = [[info_dict["url"], 0, 0]]
+        # Ссылки на этот же формат на других серверах — из прошлых разборов.
+        with _mirror_lock:
+            known = dict(_ALT.get(_alt_key(info_dict, size), {}))
+        for netloc, alt in known.items():
+            if all(urlparse(x[0]).netloc != netloc for x in mirrors):
+                mirrors.append([alt, 0, 0])
         alive: dict[int, float] = {}             # поток -> время последней удачи
         headers = dict(info_dict.get("http_headers") or {})
         tmp = self.temp_name(filename)
@@ -154,16 +227,28 @@ class RaceFD(FileDownloader):
                 return min(left, key=lambda c: inflight[c]) if left else -1
 
         def best_mirror() -> int:
-            """Зеркало с лучшим счётом; новое (без истории) — в приоритете."""
+            """Сервер с лучшим счётом за всю задачу; новый — в приоритете."""
             with lock:
-                return max(range(len(mirrors)),
-                           key=lambda m: (mirrors[m][1] + 1) / (mirrors[m][2] + 1) + m * 0.01)
+                urls = [x[0] for x in mirrors]
+            return max(range(len(urls)), key=lambda m: _host_score(urls[m]) + m * 0.01)
 
         def worker(slot: _Slot, wid: int):
             backoff = 0.0
-            m = 0
+            m = best_mirror()           # заведомо заблокированный сервер — в обход
+            began = time.monotonic()
             try:
                 while not stop.is_set():
+                    # Не стучимся в заблокированный сервер: есть другой — к
+                    # нему; нет — ждём, пока разбор найдёт (но недолго: вдруг
+                    # блокировку уже сняли).
+                    if _is_banned(mirrors[m][0]):
+                        alt = best_mirror()
+                        if not _is_banned(mirrors[alt][0]):
+                            m = alt
+                        elif time.monotonic() - began < BAN_WAIT:
+                            _count("avoided")
+                            stop.wait(0.5)
+                            continue
                     i = next_chunk()
                     if i is None:
                         return
@@ -196,6 +281,7 @@ class RaceFD(FileDownloader):
                             mirrors[m][1] += 1
                             alive[wid] = time.monotonic()
                         _count("conn_ok")
+                        _host_note(mirrors[m][0], True)
                         with lock:
                             if i not in finished and pos == end + 1:
                                 finished.add(i)
@@ -208,6 +294,7 @@ class RaceFD(FileDownloader):
                             fails[0] += 1
                             mirrors[m][2] += 1
                         _count("conn_fail")
+                        _host_note(mirrors[m][0], False)
                         with lock:
                             if fails[0] >= MAX_FAILS:
                                 stop.set()
@@ -239,11 +326,11 @@ class RaceFD(FileDownloader):
         def resolve():
             """Повторно разобрать ролик и добавить зеркало на другом сервере."""
             try:
-                new = _fresh_url(info_dict, size)
-                if new:
+                for new in _fresh_urls(info_dict, size):
                     host = urlparse(new).netloc
                     with lock:
-                        if all(urlparse(x[0]).netloc != host for x in mirrors):
+                        if (len(mirrors) < MAX_MIRRORS
+                                and all(urlparse(x[0]).netloc != host for x in mirrors)):
                             mirrors.append([new, 0, 0])
                             with _stats_lock:
                                 STATS["mirrors"] = max(STATS["mirrors"], len(mirrors))
@@ -325,10 +412,33 @@ def _fresh_url(info: dict, size: int) -> str | None:
             data = ydl.sanitize_info(data)
     except Exception:                                   # noqa: BLE001
         return None
-    for f in data.get("formats") or []:
-        if f.get("format_id") == fid and f.get("url") and _size_of(f) == size:
-            return f["url"]
-    return None
+    # Разбор приносит ссылки на ВСЕ форматы — запоминаем их: следующей
+    # дорожке задачи новый разбор уже не понадобится.
+    found = None
+    with _mirror_lock:
+        for f in data.get("formats") or []:
+            fsize = _size_of(f)
+            if not (f.get("url") and f.get("format_id") and fsize):
+                continue
+            key = (page, f["format_id"], fsize)
+            _ALT.setdefault(key, {})[urlparse(f["url"]).netloc] = f["url"]
+            if f["format_id"] == fid and fsize == size:
+                found = f["url"]
+    return found
+
+
+def _fresh_urls(info: dict, size: int) -> list[str]:
+    """Несколько разборов разом: YouTube часто отдаёт тот же сервер, а
+    параллельные запросы чаще получают разные."""
+    from concurrent.futures import ThreadPoolExecutor
+    with ThreadPoolExecutor(RESOLVE_PARALLEL) as ex:
+        urls = list(ex.map(lambda _: _fresh_url(info, size), range(RESOLVE_PARALLEL)))
+    out, seen = [], set()
+    for u in urls:
+        if u and urlparse(u).netloc not in seen:
+            seen.add(urlparse(u).netloc)
+            out.append(u)
+    return out
 
 
 def install() -> None:

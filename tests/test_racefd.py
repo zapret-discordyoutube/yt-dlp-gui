@@ -109,3 +109,102 @@ def test_switches_to_mirror_when_server_is_blocked(server, tmp_path, monkeypatch
         dead.close()
     assert ok and asked
     assert out.read_bytes() == DATA
+
+
+# --- общий список заблокированных серверов (hostban) ------------------------
+
+import socket as _socket
+import threading as _threading
+import time as _time
+
+import hostban
+
+
+def _silent_server():
+    """Принимает соединения и молчит; считает, сколько их было."""
+    srv = _socket.socket()
+    srv.bind(("127.0.0.1", 0))
+    srv.listen(64)
+    srv.settimeout(0.2)
+    seen = {"n": 0}
+    stop = _threading.Event()
+    held = []
+
+    def loop():
+        while not stop.is_set():
+            try:
+                c, _ = srv.accept()
+                seen["n"] += 1
+                held.append(c)
+            except OSError:
+                continue
+    _threading.Thread(target=loop, daemon=True).start()
+
+    def close():
+        stop.set()
+        for c in held:
+            c.close()
+        srv.close()
+    return f"http://127.0.0.1:{srv.getsockname()[1]}/videoplayback", seen, close
+
+
+@pytest.fixture
+def fresh_racefd(monkeypatch):
+    """Чистые знания о серверах; «IP» = host:port (в тестах всё на 127.0.0.1)."""
+    monkeypatch.setattr(racefd, "_HOSTS", {})
+    monkeypatch.setattr(racefd, "_ALT", {})
+    monkeypatch.setattr(racefd, "_ip_of", lambda url: racefd.urlparse(url).netloc)
+    monkeypatch.setattr(racefd, "READ_TIMEOUT", 1)
+    monkeypatch.setattr(racefd, "CONNECT_TIMEOUT", 1)
+    for ip, _, _ in hostban.listing():
+        hostban.clear(ip)
+    yield
+
+
+def test_hostban_roundtrip_and_ttl():
+    hostban.ban("203.0.113.5")
+    assert hostban.is_banned("203.0.113.5")
+    hostban.clear("203.0.113.5")
+    assert not hostban.is_banned("203.0.113.5")
+    hostban.ban("203.0.113.6", ttl=0.2)
+    assert hostban.is_banned("203.0.113.6")
+    _time.sleep(0.3)
+    hostban._invalidate()
+    assert not hostban.is_banned("203.0.113.6"), "запись не истекла"
+
+
+def test_banned_server_is_not_touched(server, tmp_path, fresh_racefd, monkeypatch):
+    """Сервер уже в списке, а ссылка на другом сервере известна — в
+    заблокированный не уходит ни одного соединения."""
+    dead_url, seen, close = _silent_server()
+    hostban.ban(racefd.urlparse(dead_url).netloc)
+    info = {"url": dead_url, "filesize": len(DATA), "http_headers": {},
+            "format_id": "401", "webpage_url": "https://www.youtube.com/watch?v=y"}
+    racefd._ALT[racefd._alt_key(info, len(DATA))] = {racefd.urlparse(server).netloc: server}
+    monkeypatch.setattr(racefd, "_fresh_url", lambda i, s: None)
+    ydl = yt_dlp.YoutubeDL({"quiet": True, "no_warnings": True})
+    fd = racefd.RaceFD(ydl, {"quiet": True, "noprogress": True})
+    out = tmp_path / "b.mp4"
+    try:
+        assert fd.real_download(str(out), info)
+    finally:
+        close()
+    assert out.read_bytes() == DATA
+    assert seen["n"] == 0, f"в заблокированный сервер постучались {seen['n']} раз"
+
+
+def test_blocked_server_gets_banned(server, tmp_path, fresh_racefd, monkeypatch):
+    dead_url, seen, close = _silent_server()
+    monkeypatch.setattr(racefd, "RESOLVE_EVERY", 3)
+    monkeypatch.setattr(racefd, "_fresh_url", lambda i, s: server)
+    ydl = yt_dlp.YoutubeDL({"quiet": True, "no_warnings": True})
+    fd = racefd.RaceFD(ydl, {"quiet": True, "noprogress": True})
+    out = tmp_path / "c.mp4"
+    try:
+        assert fd.real_download(str(out), {"url": dead_url, "filesize": len(DATA),
+                                           "http_headers": {}, "format_id": "401",
+                                           "webpage_url": "https://www.youtube.com/watch?v=z"})
+    finally:
+        close()
+    assert hostban.is_banned(racefd.urlparse(dead_url).netloc)
+    assert not hostban.is_banned(racefd.urlparse(server).netloc)

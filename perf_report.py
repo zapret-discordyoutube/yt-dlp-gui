@@ -5,7 +5,9 @@
 скорость и как часто пришлось менять видеосервер (признак DPI).
 """
 import sys
+import time
 
+import hostban
 import stats
 
 
@@ -36,6 +38,11 @@ def main() -> None:
             print(f"  смена сервера: {g['mirror_switches']} раз, "
                   f"непробившихся соединений {g['conn_fail_share'] * 100:.0f}%")
         print()
+    bans = hostban.listing()
+    print(f"Заблокированные видеосерверы сейчас (обходим): {len(bans)}")
+    now = time.time()
+    for ip, since, until in bans:
+        print(f"  {ip}: в списке {int((now - since) / 60)} мин, ещё {int((until - now) / 60)} мин")
 
 
 if __name__ == "__main__":
