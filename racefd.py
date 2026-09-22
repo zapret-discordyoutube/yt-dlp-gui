@@ -86,8 +86,10 @@ def suitable(info: dict, params: dict) -> bool:
     host = urlparse(info.get("url") or "").hostname or ""
     if not host.endswith(".googlevideo.com"):
         return False
-    size = _size_of(info)
-    return bool(size) and size > 2 * CHUNK
+    # Порога по размеру нет: маленький файл (звук короткого ролика) штатный
+    # загрузчик так же вешает на DPI, а у нас за единственный кусок сразу
+    # гоняются все соединения.
+    return bool(_size_of(info))
 
 
 class RaceFD(FileDownloader):
