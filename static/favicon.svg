@@ -1,14 +1,9 @@
 <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 64 64" role="img" aria-label="yt-grab">
-  <!-- Собственная марка: скруглённый квадрат и стрелка загрузки. -->
-  <defs>
-    <linearGradient id="g" x1="0" y1="0" x2="0" y2="1">
-      <stop offset="0" stop-color="#7f7ff2"/>
-      <stop offset="1" stop-color="#5b5bd6"/>
-    </linearGradient>
-  </defs>
-  <rect width="64" height="64" rx="15" fill="url(#g)"/>
-  <path d="M32 14v22" stroke="#fff" stroke-width="6" stroke-linecap="round"/>
-  <path d="M21 29l11 11 11-11" fill="none" stroke="#fff" stroke-width="6"
+  <!-- Собственная марка: скруглённый квадрат и стрелка загрузки в лоток. -->
+  <rect width="64" height="64" rx="16" fill="#c8f542"/>
+  <path d="M32 13v24" stroke="#10120a" stroke-width="6.5" stroke-linecap="round"/>
+  <path d="M21 27l11 11 11-11" fill="none" stroke="#10120a" stroke-width="6.5"
         stroke-linecap="round" stroke-linejoin="round"/>
-  <rect x="18" y="45" width="28" height="6" rx="3" fill="#fff" opacity=".85"/>
+  <path d="M16 42v5a4 4 0 0 0 4 4h24a4 4 0 0 0 4-4v-5" fill="none" stroke="#10120a"
+        stroke-width="6.5" stroke-linecap="round" stroke-linejoin="round"/>
 </svg>
