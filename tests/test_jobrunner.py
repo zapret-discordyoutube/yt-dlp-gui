@@ -116,3 +116,17 @@ def test_metrics_are_filled(manager):
     assert m["engine"] == "ytdlp"
     assert m["total_ms"] is not None and m["queue_ms"] is not None
     assert not any(k.startswith("_") for k in m), "служебные отметки утекли"
+
+
+def test_youtube_prefers_https_formats():
+    """HLS-форматы YouTube висли на заблокированном сервере: при равном
+    разрешении берём https (его качает racefd со сменой сервера)."""
+    import io
+    import jobrunner
+    yt = jobrunner.Job({"id": "6" * 32, "url": "https://www.youtube.com/watch?v=x",
+                        "fmt": "bv*+ba/b"}, io.StringIO())
+    other = jobrunner.Job({"id": "7" * 32, "url": "https://vimeo.com/1",
+                           "fmt": "bv*+ba/b"}, io.StringIO())
+    fs = yt.ydl_opts()["format_sort"]
+    assert fs.index("res") < fs.index("proto:https")
+    assert "format_sort" not in other.ydl_opts()
