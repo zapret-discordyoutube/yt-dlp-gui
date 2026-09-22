@@ -119,3 +119,22 @@ def test_image_post_is_still_a_gallery(probe_with):
             "thumbnails": [{"url": "https://pbs.twimg.com/media/a.jpg"}],
             "thumbnail": "https://pbs.twimg.com/media/a.jpg"}
     assert probe_with(info)["is_gallery"] is True
+
+
+def test_silent_bot_check_retries_via_egress(monkeypatch):
+    """Антибот YouTube при ignore_no_formats_error приходит «молча» — роликом
+    без форматов. Такой ролик повторяем через egress."""
+    import config
+    monkeypatch.setattr(config, "EGRESS_PROXY", "socks5h://127.0.0.1:1")
+    ok = {"id": "x", "title": "Ролик", "duration": 60,
+          "formats": [{"format_id": "18", "ext": "mp4", "vcodec": "avc1",
+                       "acodec": "mp4a", "height": 360}]}
+    calls = []
+
+    def fake(url, proxy):
+        calls.append(proxy)
+        return ok if proxy else {**ok, "formats": []}
+    monkeypatch.setattr(dl, "_probe_extract", fake)
+    out = dl.probe("https://www.youtube.com/watch?v=x")
+    assert out["via_egress"] is True and out["formats"]
+    assert calls == [None, "socks5h://127.0.0.1:1"]
