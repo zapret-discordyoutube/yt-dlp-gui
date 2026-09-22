@@ -131,6 +131,12 @@ class Job:
                           percent=round(done / total * 100, 1) if total else None,
                           speed=speed, eta=eta, total=total)
             elif st == "finished":
+                # Маленький файл успевает скачаться до первого замера — тогда
+                # объявляем «скачивание» задним числом, иначе у задачи нет ни
+                # момента первого байта, ни скорости в метриках.
+                if not started[0]:
+                    started[0] = True
+                    self.status("downloading")
                 # Дорожка скачана; дальше может быть склейка/перекодирование.
                 self.emit(ev="progress", percent=100, speed=None, eta=None,
                           total=None)
