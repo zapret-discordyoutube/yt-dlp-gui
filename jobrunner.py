@@ -38,6 +38,9 @@ import config
 import downloader as dl
 import racefd
 
+# Порядок форматов YouTube: сначала разрешение и fps, затем https вместо HLS.
+YT_FORMAT_SORT = ("res", "fps", "hdr:12", "proto:https")
+
 # Как часто отправлять прогресс. Хук yt-dlp вызывается на каждый блок
 # данных — сотни раз в секунду; родителю столько не нужно.
 _PROGRESS_EVERY_SEC = 0.5
@@ -195,6 +198,13 @@ class Job:
         # оборвать на середине (у mp4 не будет moov-атома).
         if self.is_live:
             opts["hls_use_mpegts"] = True
+        # YouTube: при равных разрешении и fps — https-формат вместо HLS.
+        # «Премиальные» форматы (616 и т.п.) отдаются только через HLS, и
+        # yt-dlp выбирал их, а фрагменты HLS идут штатным загрузчиком без
+        # смены сервера — и висли на заблокированном видеосервере. Для
+        # https-форматов работает racefd. Разрешение при этом не теряется.
+        if dl.is_youtube(self.url):
+            opts["format_sort"] = list(YT_FORMAT_SORT)
         # Отрезок вне YouTube — частичная загрузка только нужного куска.
         if self.clip and not dl.is_youtube(self.url):
             opts.update(dl.clip_range_opts(*self.clip))
