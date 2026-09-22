@@ -23,6 +23,7 @@ DownloadCancelled; запись эфира при этом сохраняетс�
 """
 from __future__ import annotations
 
+import copy
 import json
 import logging
 import os
@@ -60,6 +61,9 @@ class Job:
         self.images_mode: bool = bool(spec.get("images_mode"))
         self.bundle: bool = bool(spec.get("bundle"))
         self.proxy: str | None = spec.get("proxy") or None
+        # Разбор из «Проверить» (сделан сервером тем же путём) — если есть,
+        # ролик заново не разбираем.
+        self.info: dict | None = spec.get("info") or None
         clip = spec.get("clip")
         self.clip: tuple[float, float | None] | None = (
             (float(clip[0]), None if clip[1] is None else float(clip[1]))
@@ -218,7 +222,18 @@ class Job:
 
     def download_media(self) -> str | None:
         with yt_dlp.YoutubeDL(self.ydl_opts()) as ydl:
-            info = ydl.extract_info(self.url, download=True)
+            info = None
+            if self.info:
+                try:
+                    info = ydl.process_ie_result(copy.deepcopy(self.info), download=True)
+                except yt_dlp.utils.DownloadError:
+                    # Готовые ссылки не сработали (истекли, другой путь) —
+                    # обычный путь: разобрать ролик заново.
+                    if self.cancelled or self.error:
+                        raise
+                    info = None
+            if info is None:
+                info = ydl.extract_info(self.url, download=True)
             reqs = (info.get("requested_downloads") or []) if isinstance(info, dict) else []
             final = reqs[0].get("filepath") if reqs else None
             if final:
@@ -350,6 +365,12 @@ def execute(spec: dict, out) -> dict:
     """Выполнить задачу и вернуть итоговое событие done (без "ev")."""
     job = Job(spec, out)
     result = _execute(job)
+    if racefd.STATS["conn_fail"] >= 20:
+        # Без ссылки: только домен и виды ошибок — чтобы видеть, что именно
+        # мешает (HTTP-отказ, таймаут, обрыв) на прямом пути и через egress.
+        logging.warning("racefd %s: удачных %d, неудач %d: %s", dl._host_of(job.url),
+                        racefd.STATS["conn_ok"], racefd.STATS["conn_fail"],
+                        dict(sorted(racefd.FAIL_KINDS.items(), key=lambda kv: -kv[1])[:6]))
     # Метрики движка для статистики производительности (без ссылок).
     engine = ("images" if job.images_mode
               else "racefd" if racefd.STATS["files"] else "ytdlp")

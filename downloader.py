@@ -16,6 +16,7 @@ import sys
 import threading
 import time
 import uuid
+from collections import OrderedDict
 from dataclasses import dataclass, field
 from pathlib import Path
 from urllib.parse import parse_qs, parse_qsl, urlencode, urlparse, urlunparse
@@ -547,6 +548,51 @@ def _probe_extract(url: str, proxy: str | None) -> dict:
         return ydl.sanitize_info(ydl.extract_info(url, download=False))
 
 
+# --- Кэш разбора: загрузка берёт готовый результат «Проверить» ------------
+# Без него загрузка разбирала ролик заново (~2 с и лишний запрос к YouTube,
+# а частые запросы с нашего IP YouTube принимает за бота). Только память
+# процесса, не диск: ~130 КБ на ролик (автосубтитры вырезаны), не больше
+# INFO_CACHE_MAX записей, каждая живёт INFO_CACHE_SEC. Кладёт сюда только
+# сервер — от клиента разбор не принимается.
+INFO_CACHE_SEC = 600
+INFO_CACHE_MAX = 50
+_info_cache: "OrderedDict[str, tuple[float, bool, dict]]" = OrderedDict()
+_info_lock = threading.Lock()
+# Тяжёлые поля, не нужные для скачивания (автосубтитры — сотни языков).
+_INFO_DROP = ("automatic_captions", "heatmap")
+
+
+def _cache_key(url: str) -> str:
+    try:
+        return canonical_url(url)
+    except Exception:                      # noqa: BLE001
+        return url
+
+
+def cache_info(urls, via_egress: bool, info: dict) -> None:
+    slim = {k: v for k, v in info.items() if k not in _INFO_DROP}
+    now = time.time()
+    with _info_lock:
+        for u in {_cache_key(u) for u in urls if u}:
+            _info_cache[u] = (now, via_egress, slim)
+            _info_cache.move_to_end(u)
+        while len(_info_cache) > INFO_CACHE_MAX:
+            _info_cache.popitem(last=False)
+
+
+def cached_info(url: str, via_egress: bool) -> dict | None:
+    """Свежий разбор этой ссылки, сделанный тем же путём (напрямую/egress):
+    ссылки на файлы привязаны к IP, с которого их получили."""
+    with _info_lock:
+        hit = _info_cache.get(_cache_key(url))
+    if not hit:
+        return None
+    at, via, info = hit
+    if time.time() - at > INFO_CACHE_SEC or via != via_egress:
+        return None
+    return info
+
+
 def probe(url: str) -> dict:
     # Прямой доступ; при бане (IP-блок/гео/403) — повтор через egress-прокси.
     via_egress = False
@@ -573,6 +619,9 @@ def probe(url: str) -> dict:
     # Прямые эфиры: идущий можно записывать, будущий — ещё нельзя.
     live_status = info.get("live_status")
     is_live = bool(info.get("is_live")) or live_status == "is_live"
+    # Готовый разбор — загрузке (кроме эфира: его ссылки живут недолго).
+    if info.get("formats") and not is_live:
+        cache_info((url, info.get("webpage_url")), via_egress, info)
     if live_status == "is_upcoming":
         raise ValueError("upcoming")
 
@@ -1010,6 +1059,9 @@ class DownloadManager:
             "images_mode": task.images_mode, "bundle": task.bundle,
             "proxy": self._task_proxy(task),
             "clip": list(task.clip) if task.clip else None,
+            # Готовый разбор из «Проверить»: без повторного разбора ролика.
+            "info": (None if task.is_live or task.images_mode
+                     else cached_info(task.url, task.use_egress)),
         }
 
     def _spawn(self, task: Task) -> subprocess.Popen:

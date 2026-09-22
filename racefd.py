@@ -66,7 +66,9 @@ EGRESS_AFTER = 3         # сколько ждать первого байта �
 EGRESS_NEUTRAL_MBPS = 1.0  # оценка egress-пути до замеров: ниже прямого
 READ_TIMEOUT = 15        # полная тишина внутри ответа
 EGRESS_READ_TIMEOUT = 8  # через egress: подвисший туннель бросаем быстрее
-MAX_FAILS = 400          # подряд неудач у всех соединений -> ошибка (обычно раньше снимет сторож менеджера)
+MAX_FAILS = 5000         # подряд неудач у всех соединений -> ошибка; на деле решает сторож
+                         # простоя менеджера (STALL_SEC): минутный провал пути до egress
+                         # при 16 потоках набирал старые 400 неудач меньше чем за минуту
 
 
 class _Slot:
@@ -235,6 +237,15 @@ def _m_live(mr: list) -> bool:
 # Счётчики за процесс (= за одну задачу): уходят в метрики производительности.
 STATS = {"files": 0, "conn_ok": 0, "conn_fail": 0, "mirrors": 1,
          "banned": 0, "avoided": 0, "egress_bytes": 0}
+# Причины неудач по видам (HTTP-код, таймаут, обрыв…) — для диагностики.
+FAIL_KINDS: dict[str, int] = {}
+
+
+def _fail_kind(e: Exception, via: str | None) -> None:
+    name = str(e) if str(e).startswith("HTTP ") else type(e).__name__
+    key = f"{'egress' if via else 'direct'}:{name}"
+    with _stats_lock:
+        FAIL_KINDS[key] = FAIL_KINDS.get(key, 0) + 1
 _stats_lock = threading.Lock()
 
 
@@ -457,7 +468,8 @@ class RaceFD(FileDownloader):
                             elif i not in finished:
                                 todo.put(i)
                         backoff = 0.0
-                    except Exception:                         # noqa: BLE001
+                    except Exception as e:                    # noqa: BLE001
+                        _fail_kind(e, mr[3])
                         with lock:
                             fails[0] += 1
                             mr[2] += 1
