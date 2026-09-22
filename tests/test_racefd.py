@@ -219,3 +219,33 @@ def test_score_prefers_fast_and_demotes_slow(fresh_racefd, monkeypatch):
     hostban.ban("fast:1")
     assert s("http://fast:1/v") < s("http://slow:1/v")
     hostban.clear("fast:1")
+
+
+def test_falls_back_to_egress_pool(server, tmp_path, fresh_racefd, monkeypatch):
+    """Напрямую ничего не проходит — загрузка сама разбирает ролик через
+    egress и качает через пул туннелей. «Туннель» здесь — HTTP-прокси
+    (тестовый сервер принимает запрос с абсолютным адресом), а ссылка ведёт
+    на хост, достижимый только через него."""
+    dead_url, seen, close = _silent_server()
+    monkeypatch.setattr(racefd.config, "EGRESS_POOL", [server.rsplit("/", 1)[0]])
+    monkeypatch.setattr(racefd, "EGRESS_AFTER", 1)
+    monkeypatch.setattr(racefd, "_egress", {"ok": 0, "fail": 0, "speed": None})
+    racefd.STATS["egress_bytes"] = 0
+    via = []
+
+    def fake_fresh(info, size, proxy=None):
+        via.append(proxy)
+        return "http://egress-only.invalid/videoplayback" if proxy else None
+    monkeypatch.setattr(racefd, "_fresh_url", fake_fresh)
+    ydl = yt_dlp.YoutubeDL({"quiet": True, "no_warnings": True})
+    fd = racefd.RaceFD(ydl, {"quiet": True, "noprogress": True})
+    out = tmp_path / "e.mp4"
+    try:
+        assert fd.real_download(str(out), {"url": dead_url, "filesize": len(DATA),
+                                           "http_headers": {}, "format_id": "401",
+                                           "webpage_url": "https://www.youtube.com/watch?v=e"})
+    finally:
+        close()
+    assert out.read_bytes() == DATA
+    assert any(via), "разбор через egress не запускался"
+    assert racefd.STATS["egress_bytes"] > 0

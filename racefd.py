@@ -55,6 +55,13 @@ BAN_WAIT = 3             # сколько ждать запасной серве
 SLOW_MBPS = 1.0
 FAST_MBPS = 5.0
 NEUTRAL_MBPS = 2.0
+# Запасной путь через egress-узел (пул SOCKS-туннелей, config.EGRESS_POOL):
+# включается, когда все прямые серверы ролика в бане или долго нет ни байта.
+# Провайдер режет каждое соединение до узла (~300 КБ/с), поэтому у каждого
+# потока свой туннель. Ссылку для этого пути получаем разбором ЧЕРЕЗ egress:
+# YouTube привязывает ссылку к IP, с которого её запросили.
+EGRESS_AFTER = 6         # сколько ждать первого байта напрямую, с
+EGRESS_NEUTRAL_MBPS = 1.0  # оценка egress-пути до замеров: ниже прямого
 READ_TIMEOUT = 15        # полная тишина внутри ответа
 MAX_FAILS = 400          # подряд неудач у всех соединений -> ошибка (обычно раньше снимет сторож менеджера)
 
@@ -167,13 +174,64 @@ def _is_live(url: str) -> bool:
         return _HOSTS.get(urlparse(url).netloc, (0, 0))[0] > 0
 
 
-def _alt_key(info: dict, size: int) -> tuple:
-    return (info.get("webpage_url") or info.get("original_url"), info.get("format_id"), size)
+def _alt_key(info: dict, size: int, via: str | None = None) -> tuple:
+    return (info.get("webpage_url") or info.get("original_url"), info.get("format_id"),
+            size, via)
+
+
+# Зеркало: [url, удачи, неудачи, путь]; путь — None (напрямую) или "egress".
+# Egress-путь — не «сервер», а обход: в общий список блокировок и общий
+# рейтинг серверов он не пишется, его счёт — свой, в пределах процесса.
+_egress = {"ok": 0, "fail": 0, "speed": None}
+
+
+def _m_banned(mr: list) -> bool:
+    return mr[3] is None and _is_banned(mr[0])
+
+
+def _m_note(mr: list, ok: bool) -> None:
+    if mr[3] is None:
+        _host_note(mr[0], ok)
+    else:
+        with _mirror_lock:
+            _egress["ok" if ok else "fail"] += 1
+
+
+def _m_speed_note(mr: list, nbytes: int, sec: float) -> None:
+    if mr[3] is None:
+        _speed_note(mr[0], nbytes, sec)
+    elif sec > 0 and nbytes >= CHUNK // 2:
+        mbps = nbytes / sec / 1048576
+        with _mirror_lock:
+            prev = _egress["speed"]
+            _egress["speed"] = mbps if prev is None else prev * 0.7 + mbps * 0.3
+
+
+def _m_speed(mr: list) -> float:
+    if mr[3] is None:
+        return _host_speed(mr[0])
+    with _mirror_lock:
+        return _egress["speed"] or EGRESS_NEUTRAL_MBPS
+
+
+def _m_score(mr: list) -> float:
+    if mr[3] is None:
+        return _host_score(mr[0])
+    with _mirror_lock:
+        ok, fail = _egress["ok"], _egress["fail"]
+    return _m_speed(mr) * (ok + 1) / (ok + fail + 1)
+
+
+def _m_live(mr: list) -> bool:
+    if mr[3] is None:
+        return _is_live(mr[0])
+    with _mirror_lock:
+        return _egress["ok"] > 0
 
 
 # Счётчики за процесс (= за одну задачу): уходят в метрики производительности.
 STATS = {"files": 0, "conn_ok": 0, "conn_fail": 0, "mirrors": 1,
-         "banned": 0, "avoided": 0}
+         "banned": 0, "avoided": 0, "egress_bytes": 0}
 _stats_lock = threading.Lock()
 
 
@@ -229,13 +287,18 @@ class RaceFD(FileDownloader):
         # Зеркала: ссылки на ЭТОТ ЖЕ файл (тот же формат и размер) на разных
         # серверах. [url, удачи, неудачи]. Куски — байтовые диапазоны одного
         # файла, поэтому их можно брать с любого зеркала вперемешку.
-        mirrors: list[list] = [[info_dict["url"], 0, 0]]
-        # Ссылки на этот же формат на других серверах — из прошлых разборов.
+        mirrors: list[list] = [[info_dict["url"], 0, 0, None]]
+        # Ссылки на этот же формат на других серверах — из прошлых разборов
+        # (и через egress, если прошлая дорожка задачи уже туда уходила).
         with _mirror_lock:
             known = dict(_ALT.get(_alt_key(info_dict, size), {}))
+            known_egress = dict(_ALT.get(_alt_key(info_dict, size, "egress"), {}))
         for netloc, alt in known.items():
             if all(urlparse(x[0]).netloc != netloc for x in mirrors):
-                mirrors.append([alt, 0, 0])
+                mirrors.append([alt, 0, 0, None])
+        for alt in list(known_egress.values())[:1]:
+            mirrors.append([alt, 0, 0, "egress"])
+        pool = config.EGRESS_POOL
         alive: dict[int, float] = {}             # поток -> время последней удачи
         headers = dict(info_dict.get("http_headers") or {})
         tmp = self.temp_name(filename)
@@ -273,21 +336,42 @@ class RaceFD(FileDownloader):
         def best_mirror() -> int:
             """Сервер с лучшим счётом за всю задачу; новый — в приоритете."""
             with lock:
-                urls = [x[0] for x in mirrors]
-            return max(range(len(urls)), key=lambda m: _host_score(urls[m]) + m * 0.01)
+                snap = [list(x) for x in mirrors]
+            return max(range(len(snap)), key=lambda m: _m_score(snap[m]) + m * 0.01)
 
         def worker(slot: _Slot, wid: int):
             backoff = 0.0
             m = best_mirror()           # заведомо заблокированный сервер — в обход
             began = time.monotonic()
+            # Своя сессия для egress-пути: у каждого потока свой туннель.
+            esess = [None]
+
+            def session_for(mr):
+                if mr[3] is None or not pool:
+                    return slot.session
+                if esess[0] is None:
+                    px = pool[wid % len(pool)]
+                    esess[0] = requests.Session()
+                    esess[0].proxies = {"http": px, "https": px}
+                return esess[0]
+
+            def renew(mr):
+                if mr[3] is None or not pool:
+                    slot.renew()
+                elif esess[0] is not None:
+                    try:
+                        esess[0].close()
+                    except Exception:            # noqa: BLE001
+                        pass
+                    esess[0] = None
             try:
                 while not stop.is_set():
                     # Не стучимся в заблокированный сервер: есть другой — к
                     # нему; нет — ждём, пока разбор найдёт (но недолго: вдруг
                     # блокировку уже сняли).
-                    if _is_banned(mirrors[m][0]):
+                    if _m_banned(mirrors[m]):
                         alt = best_mirror()
-                        if not _is_banned(mirrors[alt][0]):
+                        if not _m_banned(mirrors[alt]):
                             m = alt
                         elif time.monotonic() - began < BAN_WAIT:
                             _count("avoided")
@@ -303,9 +387,10 @@ class RaceFD(FileDownloader):
                     start = i * CHUNK
                     end = min(size, start + CHUNK) - 1
                     t_req = time.monotonic()
+                    mr = mirrors[m]
                     try:
-                        r = slot.session.get(
-                            mirrors[m][0], headers={**headers, "Range": f"bytes={start}-{end}"},
+                        r = session_for(mr).get(
+                            mr[0], headers={**headers, "Range": f"bytes={start}-{end}"},
                             timeout=(CONNECT_TIMEOUT, READ_TIMEOUT), stream=True)
                         if r.status_code not in (200, 206):
                             r.close()
@@ -323,22 +408,24 @@ class RaceFD(FileDownloader):
                             pos += len(block)
                         with lock:
                             fails[0] = 0
-                            mirrors[m][1] += 1
+                            mr[1] += 1
                             alive[wid] = time.monotonic()
                         _count("conn_ok")
-                        _host_note(mirrors[m][0], True)
-                        _speed_note(mirrors[m][0], pos - start, time.monotonic() - t_req)
+                        if mr[3] is not None:
+                            _count("egress_bytes", pos - start)
+                        _m_note(mr, True)
+                        _m_speed_note(mr, pos - start, time.monotonic() - t_req)
                         # Медленный сервер: если есть заметно более быстрый, к
                         # которому соединения ПРЯМО СЕЙЧАС проходят, — уходим
                         # туда. На непроверенный не меняем: живое медленное
                         # соединение лучше нового, которое DPI может не пустить.
-                        cur = _host_speed(mirrors[m][0])
+                        cur = _m_speed(mr)
                         if cur < SLOW_MBPS:
                             alt = best_mirror()
-                            if (alt != m and _is_live(mirrors[alt][0])
-                                    and _host_speed(mirrors[alt][0]) > cur * 2):
+                            if (alt != m and _m_live(mirrors[alt])
+                                    and _m_speed(mirrors[alt]) > cur * 2):
+                                renew(mr)
                                 m = alt
-                                slot.renew()
                         with lock:
                             if i not in finished and pos == end + 1:
                                 finished.add(i)
@@ -349,15 +436,15 @@ class RaceFD(FileDownloader):
                     except Exception:                         # noqa: BLE001
                         with lock:
                             fails[0] += 1
-                            mirrors[m][2] += 1
+                            mr[2] += 1
                         _count("conn_fail")
-                        _host_note(mirrors[m][0], False)
+                        _m_note(mr, False)
                         with lock:
                             if fails[0] >= MAX_FAILS:
                                 stop.set()
                             if i not in finished:
                                 todo.put(i)
-                        slot.renew()
+                        renew(mr)
                         m = best_mirror()                 # новое соединение — к лучшему серверу
                         # Короткая пауза: DPI то пускает новые соединения,
                         # то нет, и долгое ожидание (раньше до 8 с) оставляло
@@ -387,13 +474,28 @@ class RaceFD(FileDownloader):
                     host = urlparse(new).netloc
                     with lock:
                         if (len(mirrors) < MAX_MIRRORS
-                                and all(urlparse(x[0]).netloc != host for x in mirrors)):
-                            mirrors.append([new, 0, 0])
+                                and all(x[3] is not None or urlparse(x[0]).netloc != host
+                                        for x in mirrors)):
+                            mirrors.append([new, 0, 0, None])
                             with _stats_lock:
                                 STATS["mirrors"] = max(STATS["mirrors"], len(mirrors))
             finally:
                 last_resolve[0] = time.monotonic()
                 resolving.clear()
+        egress_state = {"started": any(x[3] for x in mirrors), "running": False}
+
+        def resolve_egress():
+            """Ссылка на тот же формат, полученная разбором ЧЕРЕЗ egress."""
+            try:
+                new = _fresh_url(info_dict, size, proxy=pool[0])
+                if new:
+                    with lock:
+                        mirrors.append([new, 0, 0, "egress"])
+                        with _stats_lock:
+                            STATS["mirrors"] = max(STATS["mirrors"], len(mirrors))
+            finally:
+                egress_state["running"] = False
+
         started = time.time()
         for t in threads:
             t.start()
@@ -416,6 +518,17 @@ class RaceFD(FileDownloader):
                         and len(mirrors) < MAX_MIRRORS):
                     resolving.set()
                     threading.Thread(target=resolve, daemon=True).start()
+                # Запасной путь через egress: все прямые серверы в бане или
+                # долго нет ни одного живого соединения. Прямые попытки при
+                # этом продолжаются — кто первый отдаст, тот и качает.
+                if pool and not egress_state["started"] and not egress_state["running"]:
+                    with lock:
+                        direct = [x for x in mirrors if x[3] is None]
+                    all_banned = bool(direct) and all(_m_banned(x) for x in direct)
+                    starving = n_alive == 0 and time.time() - started > EGRESS_AFTER
+                    if all_banned or starving:
+                        egress_state.update(started=True, running=True)
+                        threading.Thread(target=resolve_egress, daemon=True).start()
                 now = time.time()
                 if done_now == last_b:
                     continue       # без новых байт хук не зовём: менеджер видит простой
@@ -449,9 +562,11 @@ class RaceFD(FileDownloader):
         return True
 
 
-def _fresh_url(info: dict, size: int) -> str | None:
+def _fresh_url(info: dict, size: int, proxy: str | None = None) -> str | None:
     """Новая ссылка на тот же формат: повторный разбор страницы ролика.
-    Принимаем только файл того же размера — иначе это другой файл."""
+    Принимаем только файл того же размера — иначе это другой файл.
+    proxy — разбор через egress: ссылка будет привязана к его IP и годится
+    только для загрузки через тот же egress."""
     import yt_dlp
     page = info.get("webpage_url") or info.get("original_url")
     fid = info.get("format_id")
@@ -464,7 +579,8 @@ def _fresh_url(info: dict, size: int) -> str | None:
 
     try:
         with yt_dlp.YoutubeDL({"quiet": True, "no_warnings": True, "logger": _Quiet(),
-                               "socket_timeout": 15}) as ydl:
+                               "socket_timeout": 15,
+                               **({"proxy": proxy} if proxy else {})}) as ydl:
             data = ydl.extract_info(page, download=False, process=False)
             data = ydl.sanitize_info(data)
     except Exception:                                   # noqa: BLE001
@@ -477,7 +593,7 @@ def _fresh_url(info: dict, size: int) -> str | None:
             fsize = _size_of(f)
             if not (f.get("url") and f.get("format_id") and fsize):
                 continue
-            key = (page, f["format_id"], fsize)
+            key = (page, f["format_id"], fsize, "egress" if proxy else None)
             _ALT.setdefault(key, {})[urlparse(f["url"]).netloc] = f["url"]
             if f["format_id"] == fid and fsize == size:
                 found = f["url"]

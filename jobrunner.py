@@ -350,7 +350,8 @@ def execute(spec: dict, out) -> dict:
               else "racefd" if racefd.STATS["files"] else "ytdlp")
     result["metrics"] = {"engine": engine, "mirrors": racefd.STATS["mirrors"],
                          "conn_ok": racefd.STATS["conn_ok"],
-                         "conn_fail": racefd.STATS["conn_fail"]}
+                         "conn_fail": racefd.STATS["conn_fail"],
+                         "egress_bytes": racefd.STATS["egress_bytes"]}
     return result
 
 
