@@ -30,8 +30,11 @@ import requests
 from yt_dlp.downloader.common import FileDownloader
 
 CHUNK = 1 << 20          # 1 МиБ на запрос
-WORKERS = 12             # соединений на процесс
-CONNECT_TIMEOUT = 4      # TCP+TLS: повисшее рукопожатие бросаем
+WORKERS = 12             # соединений на файл
+WORKERS_BIG = 16         # на большой файл (4K и т.п.)
+BIG_FILE = 64 << 20      # от какого размера файл «большой»
+CONNECT_TIMEOUT = 3      # TCP+TLS: повисшее рукопожатие бросаем
+MAX_BACKOFF = 2.0        # пауза перед новой попыткой после неудачи
 READ_TIMEOUT = 15        # полная тишина внутри ответа
 MAX_FAILS = 400          # подряд неудач у всех соединений -> ошибка (обычно раньше снимет сторож менеджера)
 
@@ -176,9 +179,11 @@ class RaceFD(FileDownloader):
                             if i not in finished:
                                 todo.put(i)
                         slot.renew()
-                        # Не долбим DPI: новые соединения он пускает пачкой
-                        # после паузы.
-                        backoff = min(8.0, backoff * 2 or 1.0)
+                        # Короткая пауза: DPI то пускает новые соединения,
+                        # то нет, и долгое ожидание (раньше до 8 с) оставляло
+                        # большинство потоков простаивать, когда он снова
+                        # начинал пускать.
+                        backoff = min(MAX_BACKOFF, backoff * 2 or 0.5)
                         stop.wait(backoff)
                     finally:
                         with lock:
@@ -188,7 +193,7 @@ class RaceFD(FileDownloader):
             finally:
                 slot.busy = False
 
-        slots = _take_slots(WORKERS)
+        slots = _take_slots(WORKERS_BIG if size >= BIG_FILE else WORKERS)
         threads = [threading.Thread(target=worker, args=(s,), daemon=True) for s in slots]
         started = time.time()
         for t in threads:
