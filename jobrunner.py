@@ -6,6 +6,7 @@
 
     {"ev": "status",   "status": "preparing" | "downloading" | "processing"}
     {"ev": "progress", "percent": .., "speed": .., "eta": .., "total": ..}
+    {"ev": "phase",    "phase": "connect" | "bypass"}   (до первых байт)
     {"ev": "done",     "status": "finished", "filename": "<id>.<ext>"}
     {"ev": "done",     "status": "error", "error": "<текст для пользователя>"}
     {"ev": "done",     "status": "cancelled"}
@@ -112,6 +113,10 @@ class Job:
                     self.error = "На сервере закончилось место"
                     raise yt_dlp.utils.DownloadCancelled()
 
+            # Фаза до первых байт от racefd: «подключаемся» / «в обход».
+            if d.get("ytg_phase"):
+                self.emit(ev="phase", phase=d["ytg_phase"])
+                return
             st = d.get("status")
             if st == "downloading":
                 if not started[0]:

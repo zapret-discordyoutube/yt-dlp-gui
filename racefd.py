@@ -313,6 +313,9 @@ class RaceFD(FileDownloader):
         finished: set[int] = set()
         inflight: dict[int, int] = {}
         got = [0]
+        # Байты недокачанных кусков — для прогресса: на медленном соединении
+        # кусок в 1 МиБ идёт десятки секунд, и без этого полоса стояла на нуле.
+        partial: dict[int, int] = {}
         fails = [0]                 # неудач подряд (сбрасывается успехом)
         lock = threading.Lock()
         # Запись и закрытие файла — под одним замком: поток, который ещё
@@ -406,6 +409,9 @@ class RaceFD(FileDownloader):
                                         return
                                     os.pwrite(fd, block, pos)
                             pos += len(block)
+                            with lock:
+                                if i not in finished:
+                                    partial[i] = max(partial.get(i, 0), pos - start)
                         with lock:
                             fails[0] = 0
                             mr[1] += 1
@@ -429,6 +435,7 @@ class RaceFD(FileDownloader):
                         with lock:
                             if i not in finished and pos == end + 1:
                                 finished.add(i)
+                                partial.pop(i, None)
                                 got[0] += end - start + 1
                             elif i not in finished:
                                 todo.put(i)
@@ -497,6 +504,18 @@ class RaceFD(FileDownloader):
                 egress_state["running"] = False
 
         started = time.time()
+        phase = [None]
+
+        def set_phase(name: str) -> None:
+            """Сообщить, что происходит до первых байт: «подключаемся» или
+            «сервер заблокирован — качаем в обход». Только при смене фазы."""
+            if phase[0] != name:
+                phase[0] = name
+                self._hook_progress({"status": "downloading", "filename": filename,
+                                     "downloaded_bytes": 0, "total_bytes": size,
+                                     "ytg_phase": name}, info_dict)
+
+        set_phase("connect")
         for t in threads:
             t.start()
         last_t, last_b, speed = started, 0, None
@@ -504,7 +523,8 @@ class RaceFD(FileDownloader):
             while True:
                 time.sleep(0.5)
                 with lock:
-                    done_now, all_done = got[0], len(finished) == n_chunks
+                    done_now = min(size, got[0] + sum(partial.values()))
+                    all_done = len(finished) == n_chunks
                 if all_done or stop.is_set():
                     break
                 # Живых соединений мало — сервер, скорее всего, под DPI:
@@ -529,6 +549,8 @@ class RaceFD(FileDownloader):
                     if all_banned or starving:
                         egress_state.update(started=True, running=True)
                         threading.Thread(target=resolve_egress, daemon=True).start()
+                        if done_now == 0:
+                            set_phase("bypass")
                 now = time.time()
                 if done_now == last_b:
                     continue       # без новых байт хук не зовём: менеджер видит простой
