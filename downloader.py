@@ -558,6 +558,17 @@ def probe(url: str) -> dict:
             via_egress = True
         else:
             raise
+    # Ролик без единого формата — часто тот же бан, только молчаливый:
+    # при ignore_no_formats_error YouTube-антибот («Sign in to confirm you're
+    # not a bot») не бросает ошибку, а отдаёт страницу без форматов.
+    if (not via_egress and config.EGRESS_PROXY and not info.get("formats")
+            and (info.get("duration") or is_youtube(url))):
+        try:
+            alt = _probe_extract(url, config.EGRESS_PROXY)
+            if alt.get("formats"):
+                info, via_egress = alt, True
+        except yt_dlp.utils.DownloadError:
+            pass
 
     # Прямые эфиры: идущий можно записывать, будущий — ещё нельзя.
     live_status = info.get("live_status")
