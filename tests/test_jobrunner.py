@@ -107,3 +107,12 @@ def test_finished_filename_must_belong_to_task(manager, monkeypatch, tmp_path):
     manager._run(t)
     assert t.status == "error"
     other.unlink()
+
+
+def test_metrics_are_filled(manager):
+    t = _task(_closed_port_url(), "5" * 32)
+    manager._run(t)
+    m = t.metrics
+    assert m["engine"] == "ytdlp"
+    assert m["total_ms"] is not None and m["queue_ms"] is not None
+    assert not any(k.startswith("_") for k in m), "служебные отметки утекли"

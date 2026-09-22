@@ -218,3 +218,30 @@ def test_bump_never_raises(monkeypatch):
     monkeypatch.setattr(stats, "_connect", boom)
     stats.bump("api_info")
     stats.record_download("https://a.example/1")
+
+
+def test_perf_roundtrip_and_report():
+    """Метрики пишутся без ссылки (только домен) и сводятся в отчёт."""
+    import stats
+    stats.init()
+    base = {"engine": "racefd", "prepare_ms": 1500, "download_ms": 10000,
+            "total_ms": 12000, "avg_speed": 20 << 20, "mirrors": 2,
+            "conn_ok": 30, "conn_fail": 10, "queue_ms": 5}
+    stats.record_perf("youtube.com", "finished", base, size=200 << 20)
+    stats.record_perf("youtube.com", "error", {**base, "avg_speed": None},
+                      error="Источник перестал отдавать данные — попробуйте ещё раз позже")
+    rep = stats.perf_report(1)
+    g = next(x for x in rep["groups"] if x["site"] == "youtube")
+    assert g["count"] >= 2 and g["finished"] >= 1
+    assert g["error_kinds"].get("stall", 0) >= 1
+    assert g["mirror_switches"] >= 2
+    with stats._lock, stats._connect() as conn:
+        cols = [r[1] for r in conn.execute("PRAGMA table_info(perf)")]
+    assert "url" not in cols           # адрес ролика не храним
+
+
+def test_error_kind_has_no_text():
+    import stats
+    assert stats.error_kind("Этот сайт или тип ссылки не поддерживается.") == "unsupported"
+    assert stats.error_kind("что-то странное") == "other"
+    assert stats.error_kind(None) is None

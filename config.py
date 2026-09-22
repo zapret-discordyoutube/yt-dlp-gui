@@ -113,3 +113,6 @@ STUCK_TASK_SEC = int(os.environ.get("YTG_STUCK_TASK_SEC", str(8 * 3600)))
 # перечитывала миграция при каждом старте. 0 отключает очистку.
 FEED_RETENTION_DAYS = int(os.environ.get("YTG_FEED_RETENTION_DAYS", "365"))
 DAILY_RETENTION_DAYS = int(os.environ.get("YTG_DAILY_RETENTION_DAYS", "730"))
+# Метрики производительности загрузок (тайминги, скорость, смена серверов).
+# Нужны, чтобы видеть, как часто загрузка упирается в DPI; месяца хватает.
+PERF_RETENTION_DAYS = int(os.environ.get("YTG_PERF_RETENTION_DAYS", "30"))

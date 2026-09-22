@@ -328,6 +328,17 @@ def bundle_outputs(tid: str, title: str) -> str | None:
 def execute(spec: dict, out) -> dict:
     """Выполнить задачу и вернуть итоговое событие done (без "ev")."""
     job = Job(spec, out)
+    result = _execute(job)
+    # Метрики движка для статистики производительности (без ссылок).
+    engine = ("images" if job.images_mode
+              else "racefd" if racefd.STATS["files"] else "ytdlp")
+    result["metrics"] = {"engine": engine, "mirrors": racefd.STATS["mirrors"],
+                         "conn_ok": racefd.STATS["conn_ok"],
+                         "conn_fail": racefd.STATS["conn_fail"]}
+    return result
+
+
+def _execute(job: Job) -> dict:
 
     def on_term(signum, frame):              # noqa: ARG001
         job.cancelled = True

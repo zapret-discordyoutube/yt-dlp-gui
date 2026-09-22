@@ -61,6 +61,16 @@ class _Slot:
         self.session = requests.Session()
 
 
+# Счётчики за процесс (= за одну задачу): уходят в метрики производительности.
+STATS = {"files": 0, "conn_ok": 0, "conn_fail": 0, "mirrors": 1}
+_stats_lock = threading.Lock()
+
+
+def _count(key: str, n: int = 1) -> None:
+    with _stats_lock:
+        STATS[key] += n
+
+
 _slots_lock = threading.Lock()
 _slots: list[_Slot] = []
 
@@ -104,6 +114,7 @@ def suitable(info: dict, params: dict) -> bool:
 class RaceFD(FileDownloader):
     def real_download(self, filename, info_dict):
         size = _size_of(info_dict)
+        _count("files")
         # Зеркала: ссылки на ЭТОТ ЖЕ файл (тот же формат и размер) на разных
         # серверах. [url, удачи, неудачи]. Куски — байтовые диапазоны одного
         # файла, поэтому их можно брать с любого зеркала вперемешку.
@@ -184,6 +195,8 @@ class RaceFD(FileDownloader):
                             fails[0] = 0
                             mirrors[m][1] += 1
                             alive[wid] = time.monotonic()
+                        _count("conn_ok")
+                        with lock:
                             if i not in finished and pos == end + 1:
                                 finished.add(i)
                                 got[0] += end - start + 1
@@ -194,6 +207,8 @@ class RaceFD(FileDownloader):
                         with lock:
                             fails[0] += 1
                             mirrors[m][2] += 1
+                        _count("conn_fail")
+                        with lock:
                             if fails[0] >= MAX_FAILS:
                                 stop.set()
                             if i not in finished:
@@ -230,6 +245,8 @@ class RaceFD(FileDownloader):
                     with lock:
                         if all(urlparse(x[0]).netloc != host for x in mirrors):
                             mirrors.append([new, 0, 0])
+                            with _stats_lock:
+                                STATS["mirrors"] = max(STATS["mirrors"], len(mirrors))
             finally:
                 last_resolve[0] = time.monotonic()
                 resolving.clear()

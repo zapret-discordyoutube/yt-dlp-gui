@@ -686,6 +686,9 @@ class Task:
     created_at: float = field(default_factory=time.time)
     served_at: float | None = None      # когда пользователь забрал файл
     completed: bool = False             # on_complete уже вызывали
+    # Метрики производительности для статистики (тайминги, движок). Без
+    # ссылок: домен и числа, см. stats.record_perf.
+    metrics: dict = field(default_factory=dict)
     cancel: threading.Event = field(default_factory=threading.Event)
 
     def public(self) -> dict:
@@ -994,10 +997,18 @@ class DownloadManager:
     def _apply_event(self, task: Task, ev: dict) -> dict | None:
         """Применить событие исполнителя к задаче. Возвращает итог (done)."""
         kind = ev.get("ev")
+        now = time.monotonic()
+        tm = task.metrics
         if kind == "status" and ev.get("status") in ("preparing", "downloading",
                                                      "processing"):
             task.status = ev["status"]
+            if task.status == "downloading":
+                tm.setdefault("_first_byte", now)
+                tm["_dl_end"] = now
         elif kind == "progress":
+            if task.status == "downloading":
+                tm.setdefault("_first_byte", now)
+                tm["_dl_end"] = now
             for key in ("percent", "speed", "eta"):
                 setattr(task, key, ev.get(key))
             task.total_bytes = ev.get("total")
@@ -1012,6 +1023,7 @@ class DownloadManager:
         группы), отсутствие прогресса дольше STALL_SEC (источник завис) и
         общее время обработки. Возвращает итоговое событие done.
         """
+        task.metrics["_spawned"] = time.monotonic()
         proc = self._spawn(task)
         try:
             proc.stdin.write(json.dumps(self._spec(task), ensure_ascii=False) + "\n")
@@ -1084,11 +1096,13 @@ class DownloadManager:
         return {"status": "error", "error": "Внутренняя ошибка, попробуйте ещё раз"}
 
     def _run(self, task: Task) -> None:
+        task.metrics["queue_ms"] = int((time.time() - task.created_at) * 1000)
         try:
             if task.cancel.is_set():
                 task.status = "cancelled"
                 return
             result = self._execute(task)
+            task.metrics.update(result.get("metrics") or {})
             status = result.get("status")
             # Отмена могла прийти уже после последнего события. Публиковать
             # такую загрузку нельзя: пользователь нажал «Отмена» и получил
@@ -1118,6 +1132,7 @@ class DownloadManager:
             logging.exception("внутренний сбой задачи (%s)", _host_of(task.url))
         finally:
             task.completed = True
+            self._finish_metrics(task)
             # Уборка на ВСЕХ путях выхода: мусор от сбоев считается в квоте,
             # и иначе сервис начинал отвечать «нет места» здоровым людям.
             if task.status != "finished":
@@ -1127,6 +1142,23 @@ class DownloadManager:
                     self.on_complete(task)
                 except Exception:      # статистика не должна ломать загрузку
                     pass
+
+
+    @staticmethod
+    def _finish_metrics(task: Task) -> None:
+        """Свести тайминги задачи в миллисекунды (служебные отметки — прочь)."""
+        tm = task.metrics
+        end = time.monotonic()
+        spawned = tm.pop("_spawned", None)
+        first = tm.pop("_first_byte", None)
+        dl_end = tm.pop("_dl_end", None)
+        ms = lambda a, b: int((b - a) * 1000) if a is not None and b is not None else None  # noqa: E731
+        tm["prepare_ms"] = ms(spawned, first)             # до первого байта
+        tm["download_ms"] = ms(first, dl_end)
+        tm["process_ms"] = ms(dl_end, end)                # склейка, MP3, обрезка
+        tm["total_ms"] = ms(spawned, end)
+        if task.filesize and tm["download_ms"]:
+            tm["avg_speed"] = int(task.filesize / max(tm["download_ms"], 1) * 1000)
 
 
 # ---- файлы задачи на диске ----
