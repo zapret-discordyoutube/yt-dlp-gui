@@ -149,3 +149,16 @@ def test_format_id_pair_merges_into_safe_container():
     assert extra["merge_output_format"] == "mp4"
     _, extra, _ = dl.build_from_format_id("137+140", container="; rm -rf /")
     assert extra["merge_output_format"] == "mkv"
+
+
+def test_postprocessor_order_thumbnail_last():
+    """Обложка раньше метаданных роняла ffmpeg на Opus («Conversion failed!»)."""
+    fmt, extra, _ = dl.build_format("audio", acodec="best")
+    feats = {k: True for k in ("embed_thumbnail", "embed_metadata", "embed_chapters",
+                               "sponsorblock")}
+    _, extra, _, _ = dl.apply_features(fmt, extra, feats, "audio")
+    keys = [pp["key"] for pp in extra["postprocessors"]]
+    assert keys[0] == "FFmpegExtractAudio"
+    assert keys[-1] == "EmbedThumbnail"
+    assert keys.index("FFmpegMetadata") < keys.index("EmbedThumbnail")
+    assert keys.index("SponsorBlock") < keys.index("ModifyChapters")

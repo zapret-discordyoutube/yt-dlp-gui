@@ -273,6 +273,12 @@ def parse_features(data) -> dict:
     return {k: True for k in _FEATURE_KEYS if raw.get(k)}
 
 
+# Порядок постпроцессоров (по образцу yt-dlp CLI). Неизвестные ключи —
+# в начало, сохраняя исходный порядок (сортировка устойчивая).
+_PP_ORDER = ("FFmpegExtractAudio", "SponsorBlock", "ModifyChapters",
+             "FFmpegMetadata", "FFmpegEmbedSubtitle", "EmbedThumbnail")
+
+
 def apply_features(fmt: str, extra: dict, features: dict,
                    kind: str) -> tuple[str, dict, str, bool]:
     """Дополнить (fmt, extra) опциями постобработки.
@@ -333,6 +339,11 @@ def apply_features(fmt: str, extra: dict, features: dict,
         extra.pop("merge_output_format", None)
 
     if pps:
+        # Порядок как у самого yt-dlp: обложка — последней. Если вставить её
+        # раньше метаданных, ffmpeg перепаковывает Opus/M4A с огромным тегом
+        # картинки и падает («Conversion failed!» на аудио «Оригинал»).
+        order = {k: n for n, k in enumerate(_PP_ORDER)}
+        pps.sort(key=lambda pp: order.get(pp.get("key"), -1))
         extra["postprocessors"] = pps
     label = ", ".join(_FEATURE_LABELS[k] for k in _FEATURE_KEYS
                       if features.get(k))
