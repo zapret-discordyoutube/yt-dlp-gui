@@ -45,8 +45,10 @@ MAX_BACKOFF = 2.0        # пауза перед новой попыткой п�
 # разбор ролика обычно выдаёт ссылку на тот же файл на другом сервере.
 ALIVE_WINDOW = 10        # соединение «живое», если отдало кусок за это время, с
 RESOLVE_EVERY = 4        # не чаще, чем раз в столько секунд
-RESOLVE_PARALLEL = 3     # параллельных разборов за раунд: YouTube часто
-                         # выдаёт тот же сервер, а 3 разом дают разные
+RESOLVE_PARALLEL = 2     # параллельных разборов за раунд: YouTube часто
+                         # выдаёт тот же сервер, а несколько разом — разные
+MAX_RESOLVE_ROUNDS = 3   # раундов на файл: частые разборы с одного IP YouTube
+                         # принимает за бота («Sign in to confirm you're not a bot»)
 MAX_MIRRORS = 6          # сколько серверов держать для одного файла
 BAN_WAIT = 3             # сколько ждать запасной сервер, прежде чем всё же
                          # постучаться в заблокированный, с
@@ -267,9 +269,13 @@ def _size_of(info: dict) -> int | None:
 
 
 def suitable(info: dict, params: dict) -> bool:
-    """Берёмся только за прямой https-файл с googlevideo известного размера
-    и без прокси (через прокси DPI не мешает, а SOCKS мы не поддерживаем)."""
-    if params.get("proxy") or info.get("protocol") not in ("https", "http"):
+    """Берёмся за прямой https-файл с googlevideo известного размера — либо
+    без прокси, либо через egress-пул (ролик разобран через egress: YouTube
+    не пускает наш IP). Через прочие прокси — штатный загрузчик."""
+    proxy = params.get("proxy")
+    if proxy and proxy not in config.EGRESS_POOL:
+        return False
+    if info.get("protocol") not in ("https", "http"):
         return False
     host = urlparse(info.get("url") or "").hostname or ""
     if not host.endswith(".googlevideo.com"):
@@ -287,18 +293,22 @@ class RaceFD(FileDownloader):
         # Зеркала: ссылки на ЭТОТ ЖЕ файл (тот же формат и размер) на разных
         # серверах. [url, удачи, неудачи]. Куски — байтовые диапазоны одного
         # файла, поэтому их можно брать с любого зеркала вперемешку.
-        mirrors: list[list] = [[info_dict["url"], 0, 0, None]]
+        pool = config.EGRESS_POOL
+        # Задача целиком через egress (YouTube не пускает наш IP): ссылка
+        # привязана к IP узла, качаем только через пул, прямой путь не трогаем.
+        egress_only = bool(self.params.get("proxy")) and bool(pool)
+        mirrors: list[list] = [[info_dict["url"], 0, 0, "egress" if egress_only else None]]
         # Ссылки на этот же формат на других серверах — из прошлых разборов
         # (и через egress, если прошлая дорожка задачи уже туда уходила).
         with _mirror_lock:
             known = dict(_ALT.get(_alt_key(info_dict, size), {}))
             known_egress = dict(_ALT.get(_alt_key(info_dict, size, "egress"), {}))
-        for netloc, alt in known.items():
-            if all(urlparse(x[0]).netloc != netloc for x in mirrors):
-                mirrors.append([alt, 0, 0, None])
-        for alt in list(known_egress.values())[:1]:
-            mirrors.append([alt, 0, 0, "egress"])
-        pool = config.EGRESS_POOL
+        if not egress_only:
+            for netloc, alt in known.items():
+                if all(urlparse(x[0]).netloc != netloc for x in mirrors):
+                    mirrors.append([alt, 0, 0, None])
+            for alt in list(known_egress.values())[:1]:
+                mirrors.append([alt, 0, 0, "egress"])
         alive: dict[int, float] = {}             # поток -> время последней удачи
         headers = dict(info_dict.get("http_headers") or {})
         tmp = self.temp_name(filename)
@@ -471,6 +481,7 @@ class RaceFD(FileDownloader):
         threads = [threading.Thread(target=worker, args=(s, n), daemon=True)
                    for n, s in enumerate(slots)]
         resolving = threading.Event()
+        rounds = [0]                    # раундов повторного разбора за файл
         # Первый поиск запасного сервера — сразу, если соединения не поднялись.
         last_resolve = [time.monotonic() - RESOLVE_EVERY]
 
@@ -553,8 +564,10 @@ class RaceFD(FileDownloader):
                 with lock:
                     n_alive = sum(1 for t in alive.values() if mono - t < ALIVE_WINDOW)
                 if (n_alive < len(slots) // 2 and not resolving.is_set()
+                        and not egress_only and rounds[0] < MAX_RESOLVE_ROUNDS
                         and mono - last_resolve[0] > RESOLVE_EVERY
                         and len(mirrors) < MAX_MIRRORS):
+                    rounds[0] += 1
                     resolving.set()
                     threading.Thread(target=resolve, daemon=True).start()
                 maybe_prefetch(done_now)
