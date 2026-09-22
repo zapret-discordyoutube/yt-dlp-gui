@@ -48,8 +48,13 @@ RESOLVE_EVERY = 4        # не чаще, чем раз в столько сек
 RESOLVE_PARALLEL = 3     # параллельных разборов за раунд: YouTube часто
                          # выдаёт тот же сервер, а 3 разом дают разные
 MAX_MIRRORS = 6          # сколько серверов держать для одного файла
-BAN_WAIT = 6             # сколько ждать запасной сервер, прежде чем всё же
+BAN_WAIT = 3             # сколько ждать запасной сервер, прежде чем всё же
                          # постучаться в заблокированный, с
+# Скорость сервера (на одно соединение, МБ/с): медленнее SLOW — опускаем в
+# выборе, быстрее FAST — поднимаем. Без замеров считаем сервер средним.
+SLOW_MBPS = 1.0
+FAST_MBPS = 5.0
+NEUTRAL_MBPS = 2.0
 READ_TIMEOUT = 15        # полная тишина внутри ответа
 MAX_FAILS = 400          # подряд неудач у всех соединений -> ошибка (обычно раньше снимет сторож менеджера)
 
@@ -115,12 +120,51 @@ def _host_note(url: str, ok: bool) -> None:
         _count("banned")
 
 
+_speed: dict[str, float] = {}                     # netloc -> МБ/с (EMA, этот процесс)
+_speed_sent: dict[str, float] = {}                # netloc -> когда писали в общий список
+
+
+def _speed_note(url: str, nbytes: int, sec: float) -> None:
+    """Замер скорости одного куска: копим у себя и изредка делимся со всеми."""
+    if sec <= 0 or nbytes < CHUNK // 2:
+        return
+    mbps = nbytes / sec / 1048576
+    netloc = urlparse(url).netloc
+    with _mirror_lock:
+        prev = _speed.get(netloc)
+        _speed[netloc] = mbps if prev is None else prev * 0.7 + mbps * 0.3
+        cur = _speed[netloc]
+        due = time.monotonic() - _speed_sent.get(netloc, 0) > 5
+        if due:
+            _speed_sent[netloc] = time.monotonic()
+    if due:
+        hostban.rate_put(_ip_of(url), cur)
+
+
+def _host_speed(url: str) -> float:
+    """Скорость сервера: свой замер, иначе общий, иначе «средний»."""
+    with _mirror_lock:
+        mine = _speed.get(urlparse(url).netloc)
+    if mine is not None:
+        return mine
+    shared = hostban.rate_get(_ip_of(url))
+    return shared if shared is not None else NEUTRAL_MBPS
+
+
 def _host_score(url: str) -> float:
+    """Чем больше, тем лучше: скорость соединения × доля удачных попыток.
+    Медленный (<1 МБ/с) сервер уходит вниз, быстрый (>5 МБ/с) — вверх."""
     if _is_banned(url):
         return -1.0                               # заблокирован — в самый конец
     with _mirror_lock:
         ok, fail = _HOSTS.get(urlparse(url).netloc, (0, 0))
-    return (ok + 1) / (fail + 1)
+    return _host_speed(url) * (ok + 1) / (ok + fail + 1)
+
+
+def _is_live(url: str) -> bool:
+    """Соединения к серверу сейчас проходят (в этом процессе была удача)."""
+    with _mirror_lock:
+        return _HOSTS.get(urlparse(url).netloc, (0, 0))[0] > 0
 
 
 def _alt_key(info: dict, size: int) -> tuple:
@@ -258,6 +302,7 @@ class RaceFD(FileDownloader):
                         inflight[i] = inflight.get(i, 0) + 1
                     start = i * CHUNK
                     end = min(size, start + CHUNK) - 1
+                    t_req = time.monotonic()
                     try:
                         r = slot.session.get(
                             mirrors[m][0], headers={**headers, "Range": f"bytes={start}-{end}"},
@@ -282,6 +327,18 @@ class RaceFD(FileDownloader):
                             alive[wid] = time.monotonic()
                         _count("conn_ok")
                         _host_note(mirrors[m][0], True)
+                        _speed_note(mirrors[m][0], pos - start, time.monotonic() - t_req)
+                        # Медленный сервер: если есть заметно более быстрый, к
+                        # которому соединения ПРЯМО СЕЙЧАС проходят, — уходим
+                        # туда. На непроверенный не меняем: живое медленное
+                        # соединение лучше нового, которое DPI может не пустить.
+                        cur = _host_speed(mirrors[m][0])
+                        if cur < SLOW_MBPS:
+                            alt = best_mirror()
+                            if (alt != m and _is_live(mirrors[alt][0])
+                                    and _host_speed(mirrors[alt][0]) > cur * 2):
+                                m = alt
+                                slot.renew()
                         with lock:
                             if i not in finished and pos == end + 1:
                                 finished.add(i)
