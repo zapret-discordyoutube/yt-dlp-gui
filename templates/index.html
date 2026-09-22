@@ -7,12 +7,13 @@
 <meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
 <title>yt.zapret.moe — скачать видео и аудио</title>
 <meta name="description" content="Скачивание видео и аудио по ссылке. Настройки и история хранятся только в вашем браузере.">
+<meta name="theme-color" content="#0c0d0b">
 <!-- Шрифт размещён локально: внешний запрос к Google блокировал отрисовку
      и попутно отдавал им IP каждого посетителя. -->
 <link rel="preload" as="font" type="font/woff2" crossorigin
       href="{{ url_for('static', filename='fonts/inter-400-cyrillic.woff2') }}">
 <link rel="preload" as="font" type="font/woff2" crossorigin
-      href="{{ url_for('static', filename='fonts/inter-600-cyrillic.woff2') }}">
+      href="{{ url_for('static', filename='fonts/inter-700-cyrillic.woff2') }}">
 <link rel="icon" type="image/svg+xml" href="{{ url_for('static', filename='favicon.svg') }}">
 <link rel="stylesheet" href="{{ url_for('static', filename='style.css') }}">
 </head>
@@ -20,112 +21,164 @@
 
 <header class="topbar">
   <div class="topbar__in">
-    <div class="brand">
-      <span class="brand__mark" aria-hidden="true">▼</span>
-      <span>yt-grab <span class="brand__sub">· zapret.moe</span></span>
-    </div>
+    <a class="brand" href="/">
+      <span class="brand__mark" aria-hidden="true"><svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.8" stroke-linecap="round" stroke-linejoin="round"><path d="M12 3v11M7 10l5 5 5-5M4 16v2a2 2 0 0 0 2 2h12a2 2 0 0 0 2-2v-2"/></svg></span>
+      <span>yt-grab <span class="brand__sub">zapret.moe</span></span>
+    </a>
     <nav class="topnav">
-      <a href="/stats">Статистика</a>
-      <a class="topnav__ch" href="https://t.me/bypassblock" target="_blank" rel="noopener noreferrer" title="Наш канал в Telegram"><svg width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M4 11.5 20 5l-2.5 14-5-4-2.5 3-.5-4.5L18 7"/></svg><span>Канал</span></a>
-      <a class="topnav__gh" href="https://github.com/zapret-discordyoutube/yt-dlp-gui" target="_blank" rel="noopener noreferrer" title="Зеркало на GitHub"><svg width="15" height="15" viewBox="0 0 24 24" fill="currentColor" aria-hidden="true"><path d="M12 .297c-6.63 0-12 5.373-12 12 0 5.303 3.438 9.8 8.205 11.385.6.113.82-.258.82-.577 0-.285-.01-1.04-.015-2.04-3.338.724-4.042-1.61-4.042-1.61C4.422 18.07 3.633 17.7 3.633 17.7c-1.087-.744.084-.729.084-.729 1.205.084 1.838 1.236 1.838 1.236 1.07 1.835 2.809 1.305 3.495.998.108-.776.417-1.305.76-1.605-2.665-.3-5.466-1.332-5.466-5.93 0-1.31.465-2.38 1.235-3.22-.135-.303-.54-1.523.105-3.176 0 0 1.005-.322 3.3 1.23.96-.267 1.98-.399 3-.405 1.02.006 2.04.138 3 .405 2.28-1.552 3.285-1.23 3.285-1.23.645 1.653.24 2.873.12 3.176.765.84 1.23 1.91 1.23 3.22 0 4.61-2.805 5.625-5.475 5.92.42.36.81 1.096.81 2.22 0 1.606-.015 2.896-.015 3.286 0 .315.21.69.825.57C20.565 22.092 24 17.592 24 12.297c0-6.627-5.373-12-12-12"/></svg><span>GitHub</span></a>
-      <a class="topnav__repo" href="https://git.zapret.moe/zapretdiscordyoutube/yt-dlp-gui" target="_blank" rel="noopener noreferrer"
-         title="Исходный код проекта"><svg width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><circle cx="6" cy="5" r="2.5"/><circle cx="6" cy="19" r="2.5"/><circle cx="18" cy="9" r="2.5"/><path d="M6 7.5v9M8.5 5H14a4 4 0 0 1 4 4v0"/></svg><span>Исходники</span></a>
-      <a class="topnav__donate" href="https://t.me/zapretvpns_bot" target="_blank" rel="noopener noreferrer"
-         title="Поддержать проект"><svg width="14" height="14" viewBox="0 0 24 24" fill="currentColor" aria-hidden="true"><path d="M12 20s-7-4.3-7-9.2A4 4 0 0 1 12 8a4 4 0 0 1 7 2.8C19 15.7 12 20 12 20z"/></svg><span>Поддержать</span></a>
-            <button class="icon-btn" id="theme-toggle" aria-label="Сменить тему" title="Сменить тему"><svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" aria-hidden="true"><path d="M21 12.8A9 9 0 1 1 11.2 3a7 7 0 0 0 9.8 9.8z"/></svg></button>
+      <a class="topnav__keep" href="/stats"><span>Статистика</span></a>
+      <span class="topnav__sep" aria-hidden="true"></span>
+      <a href="https://t.me/bypassblock" target="_blank" rel="noopener noreferrer" title="Наш канал в Telegram"><svg width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M4 11.5 20 5l-2.5 14-5-4-2.5 3-.5-4.5L18 7"/></svg><span>Канал</span></a>
+      <a href="https://github.com/zapret-discordyoutube/yt-dlp-gui" target="_blank" rel="noopener noreferrer" title="Зеркало на GitHub"><svg width="15" height="15" viewBox="0 0 24 24" fill="currentColor" aria-hidden="true"><path d="M12 .297c-6.63 0-12 5.373-12 12 0 5.303 3.438 9.8 8.205 11.385.6.113.82-.258.82-.577 0-.285-.01-1.04-.015-2.04-3.338.724-4.042-1.61-4.042-1.61C4.422 18.07 3.633 17.7 3.633 17.7c-1.087-.744.084-.729.084-.729 1.205.084 1.838 1.236 1.838 1.236 1.07 1.835 2.809 1.305 3.495.998.108-.776.417-1.305.76-1.605-2.665-.3-5.466-1.332-5.466-5.93 0-1.31.465-2.38 1.235-3.22-.135-.303-.54-1.523.105-3.176 0 0 1.005-.322 3.3 1.23.96-.267 1.98-.399 3-.405 1.02.006 2.04.138 3 .405 2.28-1.552 3.285-1.23 3.285-1.23.645 1.653.24 2.873.12 3.176.765.84 1.23 1.91 1.23 3.22 0 4.61-2.805 5.625-5.475 5.92.42.36.81 1.096.81 2.22 0 1.606-.015 2.896-.015 3.286 0 .315.21.69.825.57C20.565 22.092 24 17.592 24 12.297c0-6.627-5.373-12-12-12"/></svg><span>GitHub</span></a>
+      <a href="https://git.zapret.moe/zapretdiscordyoutube/yt-dlp-gui" target="_blank" rel="noopener noreferrer" title="Исходный код проекта"><svg width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><circle cx="6" cy="5" r="2.5"/><circle cx="6" cy="19" r="2.5"/><circle cx="18" cy="9" r="2.5"/><path d="M6 7.5v9M8.5 5H14a4 4 0 0 1 4 4v0"/></svg><span>Исходники</span></a>
+      <a class="topnav__donate" href="https://t.me/zapretvpns_bot" target="_blank" rel="noopener noreferrer" title="Поддержать проект"><svg width="14" height="14" viewBox="0 0 24 24" fill="currentColor" aria-hidden="true"><path d="M12 20s-7-4.3-7-9.2A4 4 0 0 1 12 8a4 4 0 0 1 7 2.8C19 15.7 12 20 12 20z"/></svg><span>Поддержать</span></a>
+      <button class="icon-btn" id="theme-toggle" aria-label="Сменить тему" title="Сменить тему"><svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" aria-hidden="true"><path d="M21 12.8A9 9 0 1 1 11.2 3a7 7 0 0 0 9.8 9.8z"/></svg></button>
     </nav>
   </div>
 </header>
 
-<main class="wrap">
+<main>
 
-  <section class="hero">
-    <h1>Скачивай видео и&nbsp;аудио<br>по одной ссылке</h1>
-    <p>Выбирай качество и кодек — MP4, MP3, AAC, Opus и всё, что отдаёт источник.</p>
+<!-- Сцена: заголовок и строка ввода, во всю ширину -->
+<section class="stage">
+  <div class="app stage__in">
+    <span class="eyebrow">yt-dlp · без рекламы · без регистрации</span>
+    <h1>Скачать видео и&nbsp;аудио <em>по&nbsp;ссылке</em></h1>
+    <p class="stage__lead">Любое качество и кодек — MP4, MP3, AAC, Opus. Отрезок, субтитры,
+      обложка и прямые эфиры. Файл удаляется с сервера сразу после выдачи.</p>
 
     <form class="urlbar" id="url-form">
+      <span class="urlbar__icon" aria-hidden="true"><svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M10 13a5 5 0 0 0 7.5.5l3-3a5 5 0 0 0-7-7l-1.7 1.7"/><path d="M14 11a5 5 0 0 0-7.5-.5l-3 3a5 5 0 0 0 7 7l1.7-1.7"/></svg></span>
       <label class="sr" for="url">Ссылка на видео</label>
-      <input class="input" id="url" name="url" type="url" inputmode="url"
-             placeholder="https://… вставь ссылку" autocomplete="off" required>
+      <input class="urlbar__input" id="url" name="url" type="url" inputmode="url"
+             placeholder="Вставьте ссылку на видео, трек или пост" autocomplete="off" required>
+      <button class="paste-btn hidden" id="paste-btn" type="button" title="Вставить из буфера обмена"><svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><rect x="8" y="3" width="8" height="4" rx="1"/><path d="M16 5h2a2 2 0 0 1 2 2v12a2 2 0 0 1-2 2H6a2 2 0 0 1-2-2V7a2 2 0 0 1 2-2h2"/></svg>Вставить</button>
       <button class="btn btn--primary btn--lg" id="fetch-btn" type="submit">Проверить</button>
     </form>
-    <p class="hint">YouTube, Vimeo, Twitter/X, TikTok, SoundCloud и сотни других сайтов.</p>
-    <div class="banner hidden" id="fetch-error" role="alert"><span>⚠</span><span id="fetch-error-text"></span></div>
-  </section>
+    <div class="banner hidden" id="fetch-error" role="alert"><span aria-hidden="true">⚠</span><span id="fetch-error-text"></span></div>
 
-  <!-- Skeleton при загрузке -->
-  <section id="skeleton" class="card hidden" aria-hidden="true">
-    <div class="preview">
-      <div class="skel" style="aspect-ratio:16/9; border-radius:var(--r-md)"></div>
-      <div>
-        <div class="skel" style="height:18px; width:75%; margin-bottom:10px"></div>
-        <div class="skel" style="height:13px; width:45%; margin-bottom:20px"></div>
-        <div class="skel" style="height:40px; width:100%"></div>
-      </div>
+    <div class="sites" aria-label="Поддерживаемые сайты">
+      <span class="sites__item">YouTube</span>
+      <span class="sites__item">X / Twitter</span>
+      <span class="sites__item">TikTok</span>
+      <span class="sites__item">Instagram</span>
+      <span class="sites__item">SoundCloud</span>
+      <span class="sites__item">VK Видео</span>
+      <span class="sites__item">Twitch</span>
+      <span class="sites__item">Vimeo</span>
+      <span class="sites__more">+ сотни других</span>
     </div>
-  </section>
+  </div>
+</section>
 
-  <!-- Превью + выбор формата -->
-  <section id="preview" class="card hidden">
-    <div class="preview">
-      <div class="thumb">
-        <img id="pv-thumb" alt="" loading="lazy">
-        <span class="thumb__badge hidden" id="pv-duration"></span>
+<div class="app layout">
+  <div class="layout__main">
+
+    <!-- Пока ссылки нет: как это работает -->
+    <section id="intro">
+      <div class="intro">
+        <div class="step">
+          <span class="step__n">01</span>
+          <h3>Вставьте ссылку</h3>
+          <p>Ролик, трек, пост с фото или идущий эфир.</p>
+        </div>
+        <div class="step">
+          <span class="step__n">02</span>
+          <h3>Выберите формат</h3>
+          <p>Качество, кодек, язык звука, отрезок «с — по».</p>
+        </div>
+        <div class="step">
+          <span class="step__n">03</span>
+          <h3>Сохраните файл</h3>
+          <p>После выдачи файл сразу удаляется с сервера.</p>
+        </div>
       </div>
-      <div>
-        <div class="title" id="pv-title"></div>
-        <div class="meta" id="pv-uploader" style="margin-top:6px"></div>
-        <div class="live-note hidden" id="pv-live" style="margin-top:8px">
-          <span class="live-badge">● Прямой эфир</span>
-          Идёт трансляция. Запись пойдёт с текущего момента; чтобы остановить и
-          сохранить записанное — нажмите ✕ на карточке загрузки.
-        </div>
-        <div class="live-note hidden" id="pv-gallery" style="margin-top:8px">
-          <span class="live-badge live-badge--img">🖼 Фото</span>
-          Пост с изображениями (<span id="pv-gallery-count"></span>). Скачаются одним архивом.
-        </div>
+      <div class="facts">
+        <div class="fact">{% set gb = limits.max_filesize_mb / 1024 %}<b>{{ gb|int if gb == gb|int else gb|round(1) }}&nbsp;ГБ</b><span>максимум на файл</span></div>
+        <div class="fact"><b>{{ (limits.max_duration_sec // 3600) }}&nbsp;ч</b><span>максимум длительности</span></div>
+        <div class="fact"><b>{{ limits.file_ttl_minutes // 60 }}&nbsp;ч</b><span>файл живёт не дольше</span></div>
+        <div class="fact"><b>0</b><span>аккаунтов и регистраций</span></div>
+      </div>
+    </section>
 
-        <div style="margin-top:var(--s-5)">
-          <div class="seg" id="mode-seg" role="radiogroup" aria-label="Тип загрузки">
-            <button type="button" role="radio" data-mode="video" aria-checked="true">Видео</button>
-            <button type="button" role="radio" data-mode="audio" aria-checked="false">Аудио</button>
-            <button type="button" role="radio" data-mode="all" aria-checked="false">Все форматы</button>
+    <!-- Skeleton при загрузке -->
+    <section id="skeleton" class="card work hidden" aria-hidden="true">
+      <div class="work__head">
+        <div class="skel" style="aspect-ratio:16/9; border-radius:var(--r-md)"></div>
+        <div>
+          <div class="skel" style="height:14px; width:30%; margin-bottom:14px"></div>
+          <div class="skel" style="height:20px; width:85%; margin-bottom:10px"></div>
+          <div class="skel" style="height:14px; width:45%"></div>
+        </div>
+      </div>
+      <div class="work__body">
+        <div class="skel" style="height:44px"></div>
+        <div class="skel" style="height:42px; width:70%"></div>
+      </div>
+    </section>
+
+    <!-- Превью + выбор формата -->
+    <section id="preview" class="card work hidden">
+      <div class="work__head">
+        <div class="thumb">
+          <img id="pv-thumb" alt="" loading="lazy">
+          <span class="thumb__badge hidden" id="pv-duration"></span>
+        </div>
+        <div class="work__info">
+          <span class="source hidden" id="pv-source"></span>
+          <div class="title" id="pv-title"></div>
+          <div class="meta" id="pv-uploader"></div>
+          <div class="live-note hidden" id="pv-live">
+            <span class="live-badge">● Эфир</span>
+            Идёт трансляция. Запись пойдёт с текущего момента; чтобы остановить и
+            сохранить записанное — нажмите ✕ на карточке загрузки.
           </div>
+          <div class="live-note hidden" id="pv-gallery">
+            <span class="live-badge live-badge--img">Фото</span>
+            Пост с изображениями (<span id="pv-gallery-count"></span>). Скачаются одним архивом.
+          </div>
+        </div>
+      </div>
+
+      <div class="work__body">
+        <div class="seg seg--wide" id="mode-seg" role="radiogroup" aria-label="Тип загрузки">
+          <button type="button" role="radio" data-mode="video" aria-checked="true"><svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><rect x="2" y="5" width="15" height="14" rx="2"/><path d="m17 10 5-3v10l-5-3"/></svg>Видео</button>
+          <button type="button" role="radio" data-mode="audio" aria-checked="false"><svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M9 18V5l12-2v13"/><circle cx="6" cy="18" r="3"/><circle cx="18" cy="16" r="3"/></svg>Аудио</button>
+          <button type="button" role="radio" data-mode="all" aria-checked="false"><svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M8 6h13M8 12h13M8 18h13M3 6h.01M3 12h.01M3 18h.01"/></svg>Все форматы</button>
         </div>
 
         <!-- Видео -->
-        <div class="row" id="opts-video" style="margin-top:var(--s-4)">
-          <div class="field">
-            <label for="sel-height">Качество</label>
-            <select class="input" id="sel-height"><option value="auto">Авто (лучшее)</option></select>
+        <div class="group" id="opts-video">
+          <div class="grid-3">
+            <div class="field">
+              <label for="sel-height">Качество</label>
+              <select class="input" id="sel-height"><option value="auto">Авто (лучшее)</option></select>
+            </div>
+            <div class="field">
+              <label for="sel-vcodec">Видеокодек</label>
+              <select class="input" id="sel-vcodec">
+                <option value="auto">Любой</option>
+                <option value="h264">H.264 — совместимость</option>
+                <option value="vp9">VP9</option>
+                <option value="av1">AV1 — лучшее сжатие</option>
+              </select>
+            </div>
+            <div class="field">
+              <label for="sel-vaudio" title="Какую звуковую дорожку взять из ролика">Звук в видео</label>
+              <select class="input" id="sel-vaudio">
+                <option value="auto">Любой</option>
+                <option value="aac">AAC</option>
+                <option value="opus">Opus</option>
+              </select>
+            </div>
           </div>
-          <div class="field">
-            <label for="sel-vcodec">Видео</label>
-            <select class="input" id="sel-vcodec">
-              <option value="auto">Все кодеки</option>
-              <option value="h264">H.264 — совместимость</option>
-              <option value="vp9">VP9</option>
-              <option value="av1">AV1 — лучшее сжатие</option>
-            </select>
-          </div>
-          <div class="field">
-            <label for="sel-vaudio" title="Какую звуковую дорожку взять из ролика">Звук в видео</label>
-            <select class="input" id="sel-vaudio">
-              <option value="auto">Все кодеки</option>
-              <option value="aac">AAC</option>
-              <option value="opus">Opus</option>
-            </select>
-          </div>
-          <p class="meta" style="flex-basis:100%; margin:0">
-            Это дорожка внутри видео — источник отдаёт только AAC и Opus.
-            MP3 доступен во вкладке «Аудио».
-          </p>
+          <p class="hint">Источник отдаёт звук в AAC или Opus. MP3 — во вкладке «Аудио».</p>
         </div>
 
         <!-- Аудио -->
-        <div class="row hidden" id="opts-audio" style="margin-top:var(--s-4)">
+        <div class="group hidden" id="opts-audio">
           <div class="field">
-            <label for="sel-acodec">Кодек</label>
+            <label for="sel-acodec">Формат звука</label>
             <select class="input" id="sel-acodec">
               <option value="best">Оригинал — мгновенно, без потерь</option>
               <option value="aac">AAC — обычно без перекодирования</option>
@@ -133,105 +186,112 @@
               <option value="mp3">MP3 — совместимость, но медленно</option>
             </select>
           </div>
-          <p class="meta" style="flex-basis:100%; margin:0">
-            MP3 источники не отдают, поэтому его приходится кодировать заново —
-            на длинном ролике это займёт минуты. Остальные варианты копируют дорожку как есть.
-          </p>
+          <p class="hint">MP3 источники не отдают, его приходится кодировать заново — на длинном
+            ролике это займёт минуты. Обложка и теги встраиваются автоматически.</p>
         </div>
 
         <!-- Все форматы -->
-        <div class="hidden" id="opts-all" style="margin-top:var(--s-4)">
+        <div class="group hidden" id="opts-all">
           <div class="fmt-list" id="fmt-list" role="radiogroup" aria-label="Доступные форматы"></div>
-          <p class="meta" style="margin-top:8px">Форматы только с видео или только со звуком будут объединены автоматически.</p>
+          <p class="hint">Форматы только с видео или только со звуком будут объединены автоматически.</p>
         </div>
 
-        <!-- Язык звука (дубляж) -->
-        <div class="row hidden" id="alang-row" style="margin-top:var(--s-4)">
-          <div class="field" style="flex-basis:100%">
+        <!-- Язык звука (дубляж) и отрезок -->
+        <div class="grid-2" id="extra-row">
+          <div class="field hidden" id="alang-row">
             <label for="sel-alang">Язык звука</label>
             <select class="input" id="sel-alang"></select>
           </div>
-        </div>
-
-        <!-- Отрезок (необязательно) -->
-        <div class="row hidden" id="clip-row" style="margin-top:var(--s-4)">
-          <div class="field">
-            <label for="clip-from">Отрезок — с</label>
-            <input class="input" id="clip-from" type="text" inputmode="numeric"
-                   placeholder="напр. 1:30" autocomplete="off" spellcheck="false">
+          <div class="field hidden" id="clip-row">
+            <label for="clip-from">Отрезок <span style="text-transform:none; letter-spacing:0">(необязательно)</span></label>
+            <div class="clip">
+              <input class="input input--mono" id="clip-from" type="text" inputmode="numeric"
+                     placeholder="с 0:00" autocomplete="off" spellcheck="false" aria-label="Начало отрезка">
+              <span class="clip__sep">—</span>
+              <input class="input input--mono" id="clip-to" type="text" inputmode="numeric"
+                     placeholder="по конец" autocomplete="off" spellcheck="false" aria-label="Конец отрезка">
+            </div>
           </div>
-          <div class="field">
-            <label for="clip-to">по</label>
-            <input class="input" id="clip-to" type="text" inputmode="numeric"
-                   placeholder="напр. 2:45" autocomplete="off" spellcheck="false">
-          </div>
-          <p class="meta" style="flex-basis:100%; margin:0">
-            Пусто — весь ролик. Время: секунды (90) или M:SS (1:30) / H:MM:SS.
-          </p>
         </div>
+        <p class="hint hidden" id="clip-hint" style="margin-top:calc(-1 * var(--s-3))">Время отрезка: секунды (90), M:SS (1:30) или H:MM:SS. Пусто — весь ролик.</p>
 
         <!-- Постобработка -->
-        <div class="pp-opts" id="pp-opts" style="margin-top:var(--s-4)">
-          <label class="chk"><input type="checkbox" id="pp-embed_subs"><span>Встроить субтитры</span></label>
-          <label class="chk"><input type="checkbox" id="pp-embed_thumbnail"><span>Встроить обложку</span></label>
-          <label class="chk"><input type="checkbox" id="pp-write_thumbnail"><span>Скачать обложку</span></label>
-          <label class="chk"><input type="checkbox" id="pp-write_description"><span>Скачать описание</span></label>
-          <label class="chk"><input type="checkbox" id="pp-embed_metadata"><span>Встроить метаданные</span></label>
-          <label class="chk"><input type="checkbox" id="pp-embed_chapters"><span>Встроить главы</span></label>
-          <label class="chk"><input type="checkbox" id="pp-sponsorblock"><span>Пропустить рекламные вставки</span></label>
-          <label class="chk"><input type="checkbox" id="pp-no_merge"><span>Не объединять аудио/видео</span></label>
+        <div class="group" id="pp-opts">
+          <div class="group__label"><span>Дополнительно</span><span class="pp-count" id="pp-count"></span></div>
+          <div class="pp-opts">
+            <label class="chk"><input type="checkbox" id="pp-embed_subs"><span>Встроить субтитры</span></label>
+            <label class="chk"><input type="checkbox" id="pp-embed_thumbnail"><span>Встроить обложку</span></label>
+            <label class="chk"><input type="checkbox" id="pp-embed_metadata"><span>Встроить метаданные</span></label>
+            <label class="chk"><input type="checkbox" id="pp-embed_chapters"><span>Встроить главы</span></label>
+            <label class="chk"><input type="checkbox" id="pp-sponsorblock"><span>Вырезать рекламные вставки</span></label>
+            <label class="chk"><input type="checkbox" id="pp-write_thumbnail"><span>Обложка отдельным файлом</span></label>
+            <label class="chk"><input type="checkbox" id="pp-write_description"><span>Описание отдельным файлом</span></label>
+            <label class="chk"><input type="checkbox" id="pp-no_merge"><span>Не объединять аудио и видео</span></label>
+          </div>
         </div>
+      </div>
 
-        <div class="size-est hidden" id="size-est"></div>
-
-        <button class="btn btn--primary btn--block" id="download-btn" style="margin-top:var(--s-3)">
-          ⭳ Скачать
+      <div class="work__foot">
+        <div class="size-est" id="size-box">
+          <span class="size-est__label">Примерный размер</span>
+          <span class="size-est__value" id="size-est">—</span>
+        </div>
+        <button class="btn btn--primary btn--lg" id="download-btn">
+          <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.4" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M12 4v11M7 10l5 5 5-5M5 20h14"/></svg>
+          <span id="download-label">Скачать</span>
         </button>
       </div>
-    </div>
-  </section>
+    </section>
+  </div>
 
-  <!-- Задачи -->
-  <section class="section">
-    <div class="section__head">
-      <h2>Загрузки <span class="pill hidden" id="task-count">0</span></h2>
-    </div>
-    <div class="stack" id="tasks"></div>
-    <div class="empty" id="tasks-empty">
-      <div class="empty__icon" aria-hidden="true">⭳</div>
-      <strong>Пока пусто</strong>
-      Вставь ссылку выше, чтобы начать.
-    </div>
-  </section>
-
-  <!-- История -->
-  <section class="section">
-    <div class="section__head">
-      <h2>История</h2>
-      <button class="btn btn--ghost" id="clear-history" style="--h:32px; padding:0 12px; font-size:13px">Очистить</button>
-    </div>
-    <div class="card" id="history-card">
-      <div id="history"></div>
-      <div class="empty" id="history-empty" style="padding:var(--s-6) var(--s-4)">
-        История хранится только в этом браузере.
+  <aside class="layout__side">
+    <!-- Задачи -->
+    <section class="section">
+      <div class="section__head">
+        <h2>Загрузки <span class="pill hidden" id="task-count">0</span></h2>
       </div>
-    </div>
-  </section>
+      <div class="stack" id="tasks"></div>
+      <div class="empty empty--box" id="tasks-empty">
+        <div class="empty__icon" aria-hidden="true"><svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M12 4v11M7 10l5 5 5-5M5 20h14"/></svg></div>
+        <strong>Пока пусто</strong>
+        Здесь появятся ваши загрузки.
+      </div>
+    </section>
+
+    <!-- История -->
+    <section class="section">
+      <div class="section__head">
+        <h2>История</h2>
+        <button class="btn btn--ghost btn--sm" id="clear-history">Очистить</button>
+      </div>
+      <div class="card hist-card" id="history-card">
+        <div id="history"></div>
+        <div class="empty" id="history-empty" style="padding:var(--s-6) var(--s-4)">
+          История хранится только в этом браузере.
+        </div>
+      </div>
+    </section>
+  </aside>
+</div>
 </main>
 
-<section class="note-band">
-  <div class="note-band__in">
-    <div class="note">
-      <span aria-hidden="true">🔒</span>
-      <div class="note__text">
-        <strong>Что мы храним, а что нет.</strong>
-        <p><em>Не храним:</em> сами видеофайлы (удаляются сразу после выдачи), ваш IP, ваши личные настройки
+<section class="privacy" aria-labelledby="privacy-title">
+  <div class="privacy__in">
+    <div class="privacy__title" id="privacy-title">
+      <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><rect x="4" y="11" width="16" height="10" rx="2"/><path d="M8 11V7a4 4 0 0 1 8 0v4"/></svg>
+      Что мы храним, а что нет
+    </div>
+    <div class="privacy__row">
+      <span class="privacy__tag privacy__tag--no">Не храним</span>
+      <p>Сами видеофайлы (удаляются сразу после выдачи), ваш IP, ваши личные настройки
         и вашу историю — она лежит только в этом браузере и на сервер не уходит.</p>
-        <p><em>Храним:</em> адрес скачанного ролика и время каждого скачивания — это попадает в
+    </div>
+    <div class="privacy__row">
+      <span class="privacy__tag privacy__tag--yes">Храним</span>
+      <p>Адрес скачанного ролика и время каждого скачивания — это попадает в
         публичную <a href="/stats">ленту «что скачивают»</a> и стирается через год.
-        Без привязки к тому, кто именно скачивал.
-        Названия и обложки в ленте ваш браузер берёт напрямую с YouTube — у нас их нет.</p>
-      </div>
+        Без привязки к тому, кто именно скачивал. Названия и обложки в ленте ваш браузер
+        берёт напрямую с YouTube — у нас их нет.</p>
     </div>
   </div>
 </section>
@@ -360,14 +420,44 @@ function toast(msg, kind = "") {
 /* ---------- Fetch info ---------- */
 let current = null;   // {url, title, thumbnail, formats, ...}
 
+function setInvalid(on) {
+  $("#fetch-error").classList.toggle("hidden", !on);
+  $("#url").setAttribute("aria-invalid", String(on));
+  $("#url-form").dataset.invalid = String(on);
+}
+
+/* Вставка из буфера: кнопка — только там, где браузер даёт readText
+   (в Firefox его для страниц нет). Вставка ссылки в пустое поле сразу
+   запускает проверку — лишний клик по «Проверить» не нужен. */
+const looksLikeUrl = (s) => /^https?:\/\/\S+$/i.test(s.trim());
+if (navigator.clipboard && typeof navigator.clipboard.readText === "function") {
+  $("#paste-btn").classList.remove("hidden");
+  $("#paste-btn").addEventListener("click", async () => {
+    try {
+      const text = (await navigator.clipboard.readText()).trim();
+      if (!text) { toast("Буфер обмена пуст"); return; }
+      $("#url").value = text;
+      if (looksLikeUrl(text)) $("#url-form").requestSubmit();
+      else $("#url").focus();
+    } catch { toast("Нет доступа к буферу — вставьте ссылку вручную", "error"); }
+  });
+}
+$("#url").addEventListener("paste", (e) => {
+  const text = (e.clipboardData && e.clipboardData.getData("text")) || "";
+  if ($("#url").value.trim() || !looksLikeUrl(text)) return;
+  e.preventDefault();
+  $("#url").value = text.trim();
+  $("#url-form").requestSubmit();
+});
+
 $("#url-form").addEventListener("submit", async (e) => {
   e.preventDefault();
   const url = $("#url").value.trim();
   if (!url) return;
 
-  $("#fetch-error").classList.add("hidden");
-  $("#url").setAttribute("aria-invalid", "false");
+  setInvalid(false);
   $("#preview").classList.add("hidden");
+  $("#intro").classList.add("hidden");
   $("#skeleton").classList.remove("hidden");
   const btn = $("#fetch-btn");
   btn.setAttribute("aria-busy", "true");
@@ -385,8 +475,9 @@ $("#url-form").addEventListener("submit", async (e) => {
     renderPreview(data);
   } catch (err) {
     $("#fetch-error-text").textContent = err.message;
-    $("#fetch-error").classList.remove("hidden");
-    $("#url").setAttribute("aria-invalid", "true");
+    setInvalid(true);
+    // Прежнего превью нет — возвращаем вступление, чтобы не зиять пустотой.
+    if ($("#preview").classList.contains("hidden")) $("#intro").classList.remove("hidden");
   } finally {
     $("#skeleton").classList.add("hidden");
     btn.removeAttribute("aria-busy");
@@ -396,7 +487,10 @@ $("#url-form").addEventListener("submit", async (e) => {
 
 function renderPreview(d) {
   $("#pv-title").textContent = d.title;
-  $("#pv-uploader").textContent = [d.uploader, d.extractor].filter(Boolean).join(" · ");
+  $("#pv-uploader").textContent = d.uploader || "";
+  const src = $("#pv-source");
+  src.textContent = d.extractor || "";
+  src.classList.toggle("hidden", !d.extractor);
   const thumb = $("#pv-thumb");
   if (d.thumbnail) { thumb.src = d.thumbnail; thumb.alt = d.title; }
   else { thumb.removeAttribute("src"); thumb.alt = ""; }
@@ -405,7 +499,6 @@ function renderPreview(d) {
   else if (d.duration) { dur.textContent = fmtDur(d.duration); dur.classList.remove("hidden"); }
   else dur.classList.add("hidden");
   $("#pv-live").classList.toggle("hidden", !d.is_live);
-  $("#download-btn").textContent = d.is_live ? "● Записать эфир" : "⭳ Скачать";
 
   // качество
   const sel = $("#sel-height");
@@ -445,12 +538,16 @@ function renderPreview(d) {
   ["mode-seg", "opts-video", "opts-audio", "opts-all", "pp-opts"].forEach(id =>
     $("#" + id).classList.toggle("hidden", gallery));
   if (!gallery) setMode(settings.mode);
-  else updateSizeEst();
-  $("#download-btn").textContent =
-    gallery ? "⭳ Скачать фото" : (d.is_live ? "● Записать эфир" : "⭳ Скачать");
+  else { updateExtraRow(); updateSizeEst(); }
+  $("#download-label").textContent =
+    gallery ? "Скачать фото" : (d.is_live ? "Записать эфир" : "Скачать");
 
+  $("#intro").classList.add("hidden");
   $("#preview").classList.remove("hidden");
   $("#preview").classList.add("card--enter");
+  // Превью ниже первого экрана (узкий экран) — подводим к нему сами.
+  const top = $("#preview").getBoundingClientRect().top;
+  if (top > window.innerHeight * 0.6) $("#preview").scrollIntoView({ behavior: "smooth", block: "start" });
 }
 
 function renderFormats(formats) {
@@ -485,8 +582,9 @@ function renderFormats(formats) {
    или битрейт × длительность). Не точная, но даёт понять порядок. */
 function updateSizeEst() {
   const el = $("#size-est");
+  const box = $("#size-box");
   const fs = current && current.formats;
-  if (!fs || !fs.length || current.is_gallery) { el.classList.add("hidden"); return; }
+  if (!fs || !fs.length || current.is_gallery || current.is_live) { box.classList.add("hidden"); return; }
   const dur = current.duration || 0;
   const bytesOf = f => f.filesize || (f.tbr ? Math.round(f.tbr * 125 * dur) : 0);
   const bestAudio = () => fs.filter(f => f.kind === "audio")
@@ -508,11 +606,40 @@ function updateSizeEst() {
     }
   }
   if (total > 0) {
-    el.textContent = "Примерный размер: ~" + fmtBytes(total);
-    el.classList.remove("hidden");
+    // С отрезком файл меньше пропорционально его доле в ролике.
+    const clip = clipFraction();
+    el.textContent = "≈ " + fmtBytes(Math.round(total * clip)) + (clip < 1 ? " · отрезок" : "");
+    box.classList.remove("hidden");
   } else {
-    el.classList.add("hidden");
+    box.classList.add("hidden");
   }
+}
+
+/* Доля ролика, которую займёт отрезок (1 — весь ролик). Разбор тот же,
+   что на сервере: секунды, M:SS или H:MM:SS. */
+function parseTc(s) {
+  s = String(s || "").trim();
+  if (!/^\d{1,3}(:[0-5]?\d){0,2}(\.\d{1,3})?$/.test(s)) return null;
+  return s.split(":").reduce((acc, p) => acc * 60 + parseFloat(p), 0);
+}
+function clipFraction() {
+  const dur = (current && current.duration) || 0;
+  if (!dur || settings.mode === "all" || $("#clip-row").classList.contains("hidden")) return 1;
+  const a = parseTc($("#clip-from").value) ?? 0;
+  const b = parseTc($("#clip-to").value) ?? dur;
+  if (b <= a) return 1;
+  return Math.max(0, Math.min(1, (Math.min(b, dur) - a) / dur));
+}
+["clip-from", "clip-to"].forEach(id => $("#" + id).addEventListener("input", updateSizeEst));
+
+/* Строка «язык звука / отрезок»: прячем целиком, если в ней нечего
+   показать, — иначе пустая сетка оставляла лишний зазор. */
+function updateExtraRow() {
+  const a = $("#alang-row").classList.contains("hidden");
+  const c = $("#clip-row").classList.contains("hidden");
+  $("#extra-row").classList.toggle("hidden", a && c);
+  $("#clip-hint").classList.toggle("hidden", c);
+  $("#extra-row").style.gridTemplateColumns = (!a && !c) ? "" : "minmax(0,1fr)";
 }
 
 /* Строку выбора языка звука показываем только в режимах видео/аудио, когда у
@@ -522,6 +649,7 @@ function updateAlangRow() {
   const show = langs.length && !(current && current.is_gallery)
     && (settings.mode === "video" || settings.mode === "audio");
   $("#alang-row").classList.toggle("hidden", !show);
+  updateExtraRow();
 }
 
 /* ---------- Переключение режима ---------- */
@@ -532,10 +660,10 @@ function setMode(mode) {
   $("#opts-video").classList.toggle("hidden", mode !== "video");
   $("#opts-audio").classList.toggle("hidden", mode !== "audio");
   $("#opts-all").classList.toggle("hidden", mode !== "all");
-  updateAlangRow();
-  // Отрезок — для видео/аудио (не для «Все форматы» и галерей).
+  // Отрезок — для видео/аудио (не для «Все форматы», галерей и эфиров).
   $("#clip-row").classList.toggle("hidden",
-    (current && current.is_gallery) || !(mode === "video" || mode === "audio"));
+    !!(current && (current.is_gallery || current.is_live)) || !(mode === "video" || mode === "audio"));
+  updateAlangRow();
   updateSizeEst();
 }
 document.querySelectorAll("#mode-seg button").forEach(b =>
@@ -556,14 +684,19 @@ $("#sel-alang").addEventListener("change", (e) => {
 });
 
 /* Чекбоксы постобработки: восстановление и сохранение выбора. */
+function updatePpCount() {
+  const n = PP_KEYS.filter(k => settings.pp[k]).length;
+  $("#pp-count").textContent = n ? `выбрано: ${n}` : "";
+}
 PP_KEYS.forEach(k => {
   const el = $("#pp-" + k);
   if (!el) return;
   el.checked = !!settings.pp[k];
   el.addEventListener("change", () => {
-    settings.pp[k] = el.checked; saveSettings();
+    settings.pp[k] = el.checked; saveSettings(); updatePpCount();
   });
 });
+updatePpCount();
 
 /* ---------- Запуск загрузки ---------- */
 $("#download-btn").addEventListener("click", async () => {
@@ -629,21 +762,23 @@ const tasks = new Map();
 function addTask(t) {
   tasks.set(t.id, t);
   const el = document.createElement("div");
-  el.className = "card card--enter";
+  el.className = "card task card--enter";
   el.id = "task-" + t.id;
+  const thumb = safeUrl(t.thumbnail);
   el.innerHTML = `
     <div class="task__top">
-      <div style="min-width:0">
-        <div class="title" style="font-size:14px">${esc(t.title)}</div>
-        <div class="meta" style="margin-top:4px">${esc(t.label || "")}</div>
+      <div class="task__thumb">${thumb ? `<img src="${esc(thumb)}" alt="" loading="lazy">` : ""}</div>
+      <div class="task__body">
+        <div class="title">${esc(t.title)}</div>
+        <div class="task__label" title="${esc(t.label || "")}">${esc(t.label || "")}</div>
       </div>
-      <button class="icon-btn" data-cancel="${t.id}" aria-label="Отменить">✕</button>
+      <button class="icon-btn" data-cancel="${t.id}" aria-label="Отменить" title="Отменить">✕</button>
     </div>
     <div class="progress" data-state="indeterminate" role="progressbar"
          aria-label="Загрузка: ${esc(t.title)}" aria-valuemin="0" aria-valuemax="100">
       <div class="progress__fill"></div>
     </div>
-    <div class="meta" data-status="${t.id}" aria-live="polite">В очереди…</div>`;
+    <div class="task__status" data-status="${t.id}" aria-live="polite">В очереди…</div>`;
   $("#tasks").prepend(el);
   el.querySelector("[data-cancel]").addEventListener("click", () =>
     fetch(`/api/tasks/${t.id}/cancel`, { method: "POST" }));
@@ -728,14 +863,13 @@ function renderTask(t) {
     if (!el.querySelector(".btn--success")) {
       const a = document.createElement("a");
       a.className = "btn btn--success btn--block";
-      a.style.marginTop = "var(--s-3)";
       a.href = `/api/tasks/${t.id}/file`;
       // В отдельную вкладку: иначе при уже удалённом файле браузер уводил
       // со страницы на голый JSON с ошибкой, теряя все карточки и все
       //活ные подписки на прогресс других загрузок.
       a.target = "_blank";
       a.rel = "noopener";
-      a.textContent = "⭳ Сохранить файл";
+      a.innerHTML = '<svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.4" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M12 4v11M7 10l5 5 5-5M5 20h14"/></svg>Сохранить файл';
       el.appendChild(a);
     }
   } else if (t.status === "error") {
@@ -782,16 +916,22 @@ function renderHistory() {
     d.className = "hist";
     const when = h.at ? new Date(h.at).toLocaleDateString("ru-RU",
       { day: "2-digit", month: "2-digit", hour: "2-digit", minute: "2-digit" }) : "";
+    const u = safeUrl(h.url);
+    let host = "";
+    try { host = u ? new URL(u).hostname.replace(/^www\./, "") : ""; } catch { /* мусор */ }
     d.innerHTML = `
-      <span aria-hidden="true">🎬</span>
-      <span style="min-width:0; flex:1">
+      <div class="hist__main">
         <span class="hist__name" title="${esc(h.title)}">${esc(h.title)}</span>
-        ${safeUrl(h.url) ? `<a class="hist__url" href="${esc(h.url)}" target="_blank"
-           rel="noopener noreferrer" title="${esc(h.url)}">${esc(h.url)}</a>` : ""}
-      </span>
-      <span class="hist__meta">${esc(h.label || "")} · ${fmtBytes(h.filesize)}${when ? " · " + when : ""}</span>
-      ${safeUrl(h.url) ? `<button class="icon-btn" data-again="${esc(h.url)}"
-         aria-label="Скачать снова" title="Скачать снова">↻</button>` : ""}`;
+        <div class="hist__meta">
+          ${u ? `<a class="hist__url" href="${esc(u)}" target="_blank"
+             rel="noopener noreferrer" title="${esc(u)}">${esc(host)}</a>` : ""}
+          <span>${fmtBytes(h.filesize)}</span>
+          ${when ? `<span>${esc(when)}</span>` : ""}
+          ${h.label ? `<span title="${esc(h.label)}">${esc(h.label)}</span>` : ""}
+        </div>
+      </div>
+      ${u ? `<button class="icon-btn" data-again="${esc(u)}"
+         aria-label="Скачать снова" title="Скачать снова"><svg width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M3 12a9 9 0 0 1 15.5-6.2L21 8M21 3v5h-5M21 12a9 9 0 0 1-15.5 6.2L3 16M3 21v-5h5"/></svg></button>` : ""}`;
     box.appendChild(d);
   });
   // повторная загрузка: подставить ссылку и сразу проверить
