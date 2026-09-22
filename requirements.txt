@@ -6,3 +6,7 @@ yt-dlp==2026.8.19
 # Браузерный impersonate для yt-dlp: без него сайты за Cloudflare/анти-ботом
 # (kick.com, pornhub и др.) отдают 403/404. yt-dlp сам его подхватывает.
 curl_cffi==0.16.3
+# Загрузчик YouTube (racefd.py) ходит к видеосерверам сам, через requests;
+# PySocks — чтобы он же умел ходить через пул SOCKS-туннелей egress.
+requests==2.34.2
+PySocks==1.7.1

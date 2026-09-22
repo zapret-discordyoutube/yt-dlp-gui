@@ -36,7 +36,8 @@ def main() -> None:
               f"очередь 90% {_s(g['queue_ms_p90'])} с")
         if g["engine"] == "racefd":
             print(f"  смена сервера: {g['mirror_switches']} раз, "
-                  f"непробившихся соединений {g['conn_fail_share'] * 100:.0f}%")
+                  f"непробившихся соединений {g['conn_fail_share'] * 100:.0f}%, "
+                  f"через egress: {g['via_egress']} загрузок")
         print()
     bans = hostban.listing()
     print(f"Заблокированные видеосерверы сейчас (обходим): {len(bans)}")

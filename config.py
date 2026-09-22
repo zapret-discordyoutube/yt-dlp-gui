@@ -47,6 +47,25 @@ YT_PARALLEL = os.environ.get("YTG_YT_PARALLEL", "1") == "1"
 BAN_FAILS = int(os.environ.get("YTG_BAN_FAILS", "8"))
 BAN_TTL_SEC = int(os.environ.get("YTG_BAN_TTL_SEC", "900"))
 
+
+def _parse_pool(raw: str) -> list[str]:
+    """Пул прокси: через запятую, либо диапазон портов
+    'socks5h://127.0.0.1:18110-18125'."""
+    import re
+    out = []
+    for part in (x.strip() for x in raw.split(",")):
+        m = re.fullmatch(r"(socks5h?://[^/:]+:)(\d+)-(\d+)", part)
+        if m:
+            out += [f"{m.group(1)}{p}" for p in range(int(m.group(2)), int(m.group(3)) + 1)]
+        elif part:
+            out.append(part)
+    return out
+
+
+# Пул SOCKS-туннелей до egress-узла для YouTube, когда все прямые видеосерверы
+# ролика заблокированы (racefd). Задаёт только администратор. Пусто — выкл.
+EGRESS_POOL = _parse_pool(os.environ.get("YTG_EGRESS_POOL", ""))
+
 # Прокси для исходящих запросов yt-dlp (socks5://host:port или http://...).
 # Задаётся ТОЛЬКО администратором через окружение и никогда не принимается
 # от пользователя: произвольный прокси — это готовый SSRF.

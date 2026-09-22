@@ -98,7 +98,7 @@ CREATE INDEX IF NOT EXISTS perf_at ON perf(at);
 
 _PERF_COLS = ("error_kind", "engine", "bytes", "queue_ms", "prepare_ms",
               "download_ms", "process_ms", "total_ms", "avg_speed",
-              "mirrors", "conn_ok", "conn_fail")
+              "mirrors", "conn_ok", "conn_fail", "egress_bytes")
 
 
 _conn: sqlite3.Connection | None = None
@@ -159,6 +159,10 @@ def _init_unsafe() -> bool:
         # соединении не нужно.
         conn.execute("PRAGMA journal_mode=WAL")
         conn.executescript(_SCHEMA)
+        # Колонки, добавленные после создания таблицы perf.
+        cols = {r[1] for r in conn.execute("PRAGMA table_info(perf)")}
+        if "egress_bytes" not in cols:
+            conn.execute("ALTER TABLE perf ADD COLUMN egress_bytes INTEGER")
     return True
 
 
@@ -397,6 +401,7 @@ def perf_report(hours: int = 24) -> dict:
             "total_ms_p90": pct([r["total_ms"] for r in fin], .9),
             "queue_ms_p90": pct([r["queue_ms"] for r in rs], .9),
             "mirror_switches": sum(1 for r in rs if (r["mirrors"] or 1) > 1),
+            "via_egress": sum(1 for r in rs if (r.get("egress_bytes") or 0) > 0),
             "conn_fail_share": (round(sum(r["conn_fail"] or 0 for r in rs)
                                       / max(1, sum((r["conn_fail"] or 0) + (r["conn_ok"] or 0)
                                                    for r in rs)), 3)),
