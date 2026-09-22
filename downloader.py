@@ -698,6 +698,7 @@ class Task:
             "title": self.title,
             "label": self.label,
             "thumbnail": self.thumbnail,
+            "is_live": self.is_live,
             "status": self.status,
             "percent": self.percent,
             "speed": self.speed,
@@ -958,6 +959,11 @@ class DownloadManager:
         t = self.get(tid)
         if t and t.status in ACTIVE_STATUSES:
             t.cancel.set()
+            # Обычная загрузка отменяется сразу: пользователь видит «Отменено»
+            # мгновенно, а процесс добивает сторож в _execute. Эфир — нет:
+            # для него «стоп» значит «сохранить записанное», итог будет позже.
+            if not t.is_live:
+                t.status = "cancelled"
             return True
         return False
 
@@ -999,6 +1005,9 @@ class DownloadManager:
         kind = ev.get("ev")
         now = time.monotonic()
         tm = task.metrics
+        if task.cancel.is_set() and not task.is_live:
+            # Отменённая задача: запоздалые события процесса статус не меняют.
+            return ev if kind == "done" else None
         if kind == "status" and ev.get("status") in ("preparing", "downloading",
                                                      "processing"):
             task.status = ev["status"]
@@ -1038,7 +1047,7 @@ class DownloadManager:
         result: dict | None = None
         try:
             while True:
-                if sel.select(timeout=1.0):
+                if sel.select(timeout=0.2):
                     line = proc.stdout.readline()
                     if not line:
                         break                                  # EOF: процесс вышел
@@ -1054,7 +1063,10 @@ class DownloadManager:
                 # Отмена: сначала просим (эфир успеет сохранить записанное),
                 # не послушался — останавливаем принудительно.
                 if task.cancel.is_set() and term_sent_at is None:
-                    self._kill_group(proc, signal.SIGTERM)
+                    # Эфир просим остановиться мягко — он сохранит записанное.
+                    # Обычную загрузку останавливаем сразу: ждать нечего, файлы
+                    # всё равно удаляются.
+                    self._kill_group(proc, signal.SIGTERM if task.is_live else signal.SIGKILL)
                     term_sent_at = now
                 elif term_sent_at is not None and now - term_sent_at > config.CANCEL_GRACE_SEC:
                     self._kill_group(proc, signal.SIGKILL)

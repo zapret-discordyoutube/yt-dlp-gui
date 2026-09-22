@@ -781,8 +781,16 @@ function addTask(t) {
     </div>
     <div class="task__status" data-status="${t.id}" aria-live="polite">Запуск…</div>`;
   $("#tasks").prepend(el);
-  el.querySelector("[data-cancel]").addEventListener("click", () =>
-    fetch(`/api/tasks/${t.id}/cancel`, { method: "POST" }));
+  el.querySelector("[data-cancel]").addEventListener("click", (e) => {
+    // Отклик сразу, не дожидаясь сервера: кнопку гасим, пишем, что происходит.
+    const btn = e.currentTarget;
+    if (btn.disabled) return;
+    btn.disabled = true;
+    const st = el.querySelector(`[data-status="${t.id}"]`);
+    if (st) st.textContent = t.is_live ? "Останавливаем запись и сохраняем…" : "Отменяем…";
+    fetch(`/api/tasks/${t.id}/cancel`, { method: "POST" })
+      .catch(() => { btn.disabled = false; toast("Не удалось отменить — нет связи", "error"); });
+  });
   updateCount();
 }
 
