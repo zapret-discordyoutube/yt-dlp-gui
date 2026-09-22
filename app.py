@@ -282,13 +282,10 @@ def api_download():
             return err("Неверный отрезок: конец должен быть больше начала")
         if clip:
             label = f"{label} · ✂ {dl.clip_label(*clip)}"
-            # YouTube отдаёт HLS — частично секцию не скачать, там режем после
-            # полного скачивания (clip_task). На прочих сайтах — частичная
-            # загрузка только отрезка через download_ranges.
-            if dl.is_youtube(url):
-                clip_task = clip
-            else:
-                extra = {**extra, **dl.clip_range_opts(*clip)}
+            # Как резать, решает исполнитель: на YouTube (HLS) — полное
+            # скачивание и ffmpeg-обрезка, на прочих сайтах — частичная
+            # загрузка только нужного куска.
+            clip_task = clip
 
     title = str(data.get("title") or "Видео")[:200]
     thumb = data.get("thumbnail")

@@ -778,7 +778,7 @@ function addTask(t) {
          aria-label="Загрузка: ${esc(t.title)}" aria-valuemin="0" aria-valuemax="100">
       <div class="progress__fill"></div>
     </div>
-    <div class="task__status" data-status="${t.id}" aria-live="polite">В очереди…</div>`;
+    <div class="task__status" data-status="${t.id}" aria-live="polite">Запуск…</div>`;
   $("#tasks").prepend(el);
   el.querySelector("[data-cancel]").addEventListener("click", () =>
     fetch(`/api/tasks/${t.id}/cancel`, { method: "POST" }));
@@ -842,7 +842,17 @@ function renderTask(t) {
   const fill = el.querySelector(".progress__fill");
   const status = el.querySelector(`[data-status="${t.id}"]`);
 
-  if (t.status === "downloading" && t.percent != null) {
+  if (t.status === "queued") {
+    bar.dataset.state = "indeterminate";
+    status.textContent = "В очереди — все слоты заняты, скоро начнём…";
+  } else if (t.status === "preparing") {
+    bar.dataset.state = "indeterminate";
+    status.textContent = "Подготовка — получаем ссылки на файлы…";
+  } else if (t.status === "downloading" && t.percent == null) {
+    // Эфир или источник без размера: процента нет, показываем скорость.
+    bar.dataset.state = "indeterminate";
+    status.textContent = "Скачивание" + (t.speed ? " · " + fmtBytes(t.speed) + "/s" : "…");
+  } else if (t.status === "downloading" && t.percent != null) {
     bar.dataset.state = "downloading";
     fill.style.setProperty("--value", t.percent + "%");
     bar.setAttribute("aria-valuenow", String(Math.round(t.percent)));
