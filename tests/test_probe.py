@@ -138,3 +138,26 @@ def test_silent_bot_check_retries_via_egress(monkeypatch):
     out = dl.probe("https://www.youtube.com/watch?v=x")
     assert out["via_egress"] is True and out["formats"]
     assert calls == [None, "socks5h://127.0.0.1:1"]
+
+
+def test_info_cache_reuse_rules(monkeypatch):
+    """Готовый разбор отдаётся загрузке только свежим, тем же путём и под любым
+    из адресов ролика; тяжёлые автосубтитры не хранятся."""
+    monkeypatch.setattr(dl, "_info_cache", dl.OrderedDict())
+    info = {"id": "v", "formats": [{"format_id": "18"}], "automatic_captions": {"en": ["x"] * 100}}
+    dl.cache_info(("https://youtu.be/v?si=abc", "https://www.youtube.com/watch?v=v"), True, info)
+    got = dl.cached_info("https://www.youtube.com/watch?v=v", True)
+    assert got and "automatic_captions" not in got
+    assert dl.cached_info("https://youtu.be/v?si=abc", True)
+    assert dl.cached_info("https://www.youtube.com/watch?v=v", False) is None, \
+        "ссылки из egress нельзя качать напрямую"
+    monkeypatch.setattr(dl, "INFO_CACHE_SEC", -1)
+    assert dl.cached_info("https://www.youtube.com/watch?v=v", True) is None
+
+
+def test_info_cache_is_bounded(monkeypatch):
+    monkeypatch.setattr(dl, "_info_cache", dl.OrderedDict())
+    monkeypatch.setattr(dl, "INFO_CACHE_MAX", 3)
+    for i in range(5):
+        dl.cache_info((f"https://example.com/v{i}",), False, {"formats": [1]})
+    assert len(dl._info_cache) == 3
