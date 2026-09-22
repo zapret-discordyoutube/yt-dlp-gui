@@ -65,6 +65,7 @@ NEUTRAL_MBPS = 2.0
 EGRESS_AFTER = 3         # сколько ждать первого байта напрямую, с
 EGRESS_NEUTRAL_MBPS = 1.0  # оценка egress-пути до замеров: ниже прямого
 READ_TIMEOUT = 15        # полная тишина внутри ответа
+EGRESS_READ_TIMEOUT = 8  # через egress: подвисший туннель бросаем быстрее
 MAX_FAILS = 400          # подряд неудач у всех соединений -> ошибка (обычно раньше снимет сторож менеджера)
 
 
@@ -357,13 +358,17 @@ class RaceFD(FileDownloader):
             m = best_mirror()           # заведомо заблокированный сервер — в обход
             began = time.monotonic()
             # Своя сессия для egress-пути: у каждого потока свой туннель.
+            # После неудачи поток переходит на СЛЕДУЮЩИЙ туннель: подвисший
+            # SSH-туннель держит все свои соединения, и переподключение через
+            # него же ничего не даёт.
             esess = [None]
+            tunnel = [wid]
 
             def session_for(mr):
                 if mr[3] is None or not pool:
                     return slot.session
                 if esess[0] is None:
-                    px = pool[wid % len(pool)]
+                    px = pool[tunnel[0] % len(pool)]
                     esess[0] = requests.Session()
                     esess[0].proxies = {"http": px, "https": px}
                 return esess[0]
@@ -377,6 +382,7 @@ class RaceFD(FileDownloader):
                     except Exception:            # noqa: BLE001
                         pass
                     esess[0] = None
+                    tunnel[0] += 1
             try:
                 while not stop.is_set():
                     # Не стучимся в заблокированный сервер: есть другой — к
@@ -404,7 +410,8 @@ class RaceFD(FileDownloader):
                     try:
                         r = session_for(mr).get(
                             mr[0], headers={**headers, "Range": f"bytes={start}-{end}"},
-                            timeout=(CONNECT_TIMEOUT, READ_TIMEOUT), stream=True)
+                            timeout=(CONNECT_TIMEOUT, READ_TIMEOUT if mr[3] is None
+                                     else EGRESS_READ_TIMEOUT), stream=True)
                         if r.status_code not in (200, 206):
                             r.close()
                             raise OSError(f"HTTP {r.status_code}")

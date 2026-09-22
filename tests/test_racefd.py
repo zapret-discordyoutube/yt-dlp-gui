@@ -249,3 +249,26 @@ def test_falls_back_to_egress_pool(server, tmp_path, fresh_racefd, monkeypatch):
     assert out.read_bytes() == DATA
     assert any(via), "разбор через egress не запускался"
     assert racefd.STATS["egress_bytes"] > 0
+
+
+def test_egress_rotates_away_from_stuck_tunnel(server, tmp_path, fresh_racefd, monkeypatch):
+    """Задача целиком через egress, один туннель пула подвис — потоки на нём
+    переходят на следующий туннель, а не переподключаются через тот же."""
+    dead_url, seen, close = _silent_server()
+    dead_proxy = dead_url.rsplit("/", 1)[0]
+    good_proxy = server.rsplit("/", 1)[0]
+    monkeypatch.setattr(racefd.config, "EGRESS_POOL", [dead_proxy, good_proxy])
+    monkeypatch.setattr(racefd, "EGRESS_READ_TIMEOUT", 1)
+    monkeypatch.setattr(racefd, "_egress", {"ok": 0, "fail": 0, "speed": None})
+    ydl = yt_dlp.YoutubeDL({"quiet": True, "no_warnings": True})
+    fd = racefd.RaceFD(ydl, {"quiet": True, "noprogress": True, "proxy": dead_proxy})
+    out = tmp_path / "r.mp4"
+    try:
+        assert fd.real_download(str(out), {"url": "http://egress-only.invalid/videoplayback",
+                                           "filesize": len(DATA), "http_headers": {},
+                                           "format_id": "401",
+                                           "webpage_url": "https://www.youtube.com/watch?v=r"})
+    finally:
+        close()
+    assert out.read_bytes() == DATA
+    assert seen["n"] > 0, "подвисший туннель вообще не использовался — тест ничего не проверил"
