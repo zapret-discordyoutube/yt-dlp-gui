@@ -580,7 +580,10 @@ def _fresh_url(info: dict, size: int, proxy: str | None = None) -> str | None:
     try:
         with yt_dlp.YoutubeDL({"quiet": True, "no_warnings": True, "logger": _Quiet(),
                                "socket_timeout": 15,
-                               **({"proxy": proxy} if proxy else {})}) as ydl:
+                               # Через egress — по IPv4: IPv6-путь узла до
+                               # Google медленный (см. jobrunner._force_ipv4).
+                               **({"proxy": proxy, "source_address": "0.0.0.0"}
+                                  if proxy else {})}) as ydl:
             data = ydl.extract_info(page, download=False, process=False)
             data = ydl.sanitize_info(data)
     except Exception:                                   # noqa: BLE001

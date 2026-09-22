@@ -386,6 +386,20 @@ def _execute(job: Job) -> dict:
                 "error": "Внутренняя ошибка, попробуйте другой формат"}
 
 
+def _force_ipv4() -> None:
+    """Только IPv4 в процессе загрузки. У хоста нет IPv6-связности, а через
+    egress-пул (SOCKS с резолвом у нас) IPv6-адрес уводил узел к Google по его
+    медленному IPv6-пути: ~0,2 МБ/с против 3-4 МБ/с по IPv4."""
+    import socket
+    orig = socket.getaddrinfo
+
+    def v4(host, port, family=0, *args, **kwargs):
+        if family in (0, socket.AF_UNSPEC):
+            family = socket.AF_INET
+        return orig(host, port, family, *args, **kwargs)
+    socket.getaddrinfo = v4
+
+
 def main() -> int:
     # Канал событий — отдельный дескриптор, а stdout процесса уводим в
     # /dev/null: всё, что случайно напечатает yt-dlp или библиотека, не
@@ -394,6 +408,7 @@ def main() -> int:
     devnull = os.open(os.devnull, os.O_WRONLY)
     os.dup2(devnull, 1)
     logging.basicConfig(level=logging.WARNING, format="[job] %(message)s")
+    _force_ipv4()
     # Видео с googlevideo — своим параллельным загрузчиком (см. racefd).
     if config.YT_PARALLEL:
         racefd.install()
