@@ -2,17 +2,20 @@
 from __future__ import annotations
 
 import ipaddress
+import json
 import logging
 import os
 import queue
 import re
+import selectors
+import signal
 import socket
 import shutil
 import subprocess
+import sys
 import threading
 import time
 import uuid
-import zipfile
 from dataclasses import dataclass, field
 from pathlib import Path
 from urllib.parse import parse_qs, parse_qsl, urlencode, urlparse, urlunparse
@@ -216,7 +219,7 @@ def clip_label(start: float, end: float | None) -> str:
 def clip_range_opts(start: float, end: float | None) -> dict:
     """Опции yt-dlp для частичного скачивания только отрезка (сайты с прямыми
     форматами: X, Vimeo и т.п.). Для YouTube не годится — там HLS зависает,
-    его режем полным скачиванием + ffmpeg (см. DownloadManager._trim_file)."""
+    его режем полным скачиванием + ffmpeg (см. jobrunner.trim_file)."""
     rng_end = end if end is not None else float("inf")
     return {
         "download_ranges": yt_dlp.utils.download_range_func(None, [(start, rng_end)]),
@@ -642,6 +645,10 @@ def probe(url: str) -> dict:
 
 
 # --- Модель задачи ---
+# Незавершённые статусы: задача ещё может дать файл, её файлы трогать нельзя.
+ACTIVE_STATUSES = ("queued", "preparing", "downloading", "processing")
+
+
 @dataclass
 class Task:
     id: str
@@ -656,7 +663,7 @@ class Task:
     images_mode: bool = False    # скачать фото из поста-галереи (без видео)
     use_egress: bool = False     # качать через запасной egress-прокси (бан)
     clip: tuple | None = None    # (start,end) для пост-обрезки ffmpeg (YouTube)
-    status: str = "queued"       # queued|downloading|processing|finished|error|cancelled
+    status: str = "queued"       # queued|preparing|downloading|processing|finished|error|cancelled
     percent: float | None = None
     speed: float | None = None
     eta: int | None = None
@@ -766,7 +773,7 @@ class DownloadManager:
         # дорожку и падала после часов работы.
         with self.lock:
             live = {t.id for t in self.tasks.values()
-                    if t.status in ("queued", "downloading", "processing")}
+                    if t.status in ACTIVE_STATUSES}
 
         cutoff = now - config.FILE_TTL_MINUTES * 60
         for p in config.DOWNLOAD_DIR.iterdir():
@@ -914,7 +921,7 @@ class DownloadManager:
             free_mb = None
         with self.lock:
             tasks = list(self.tasks.values())
-        active = sum(1 for t in tasks if t.status in ("downloading", "processing"))
+        active = sum(1 for t in tasks if t.status in ("preparing", "downloading", "processing"))
         return {
             "free_disk_mb": free_mb,
             "downloads_mb": round(self._dir_size_mb(), 1),
@@ -935,388 +942,225 @@ class DownloadManager:
 
     def cancel(self, tid: str) -> bool:
         t = self.get(tid)
-        if t and t.status in ("queued", "downloading", "processing"):
+        if t and t.status in ACTIVE_STATUSES:
             t.cancel.set()
             return True
         return False
 
-    def _make_hook(self, task: Task):
-        last_disk_check = [0.0]
-        # Байты по каждому файлу отдельно: на связке video+audio yt-dlp
-        # начинает счёт заново для второй дорожки, и проверка «по текущему
-        # файлу» пропускала суммарно до двух потолков на диск.
-        per_file: dict[str, int] = {}
-        # Сглаженная скорость (EMA): у YouTube отдача рваная — мгновенная
-        # скорость скачет от сотен КБ/с до десятков МБ/с, и таймер «осталось»
-        # прыгал от секунд до минут. Показываем усреднённую.
-        ema_speed = [None]
-
-        def hook(d):
-            if task.cancel.is_set():
-                raise yt_dlp.utils.DownloadCancelled()
-
-            # Сторожевой контроль прямо во время загрузки.
-            # max_filesize у yt-dlp проверяется по заголовку Content-Length и
-            # не работает для HLS/DASH и chunked-ответов: такой поток качался
-            # бы без ограничения размера. А хост — гипервизор, заполнить его
-            # раздел нельзя.
-            name = d.get("filename") or "?"
-            per_file[name] = d.get("downloaded_bytes") or 0
-            # Размер проверяем на КАЖДОМ вызове: он почти бесплатен, а по
-            # таймеру быстрая загрузка успевала закончиться между замерами
-            # и не проверялась вовсе.
-            if sum(per_file.values()) > config.MAX_FILESIZE_MB * 1048576:
-                task.error = "Файл превышает допустимый размер"
-                task.cancel.set()
-                raise yt_dlp.utils.DownloadCancelled()
-
-            now = time.time()
-            if now - last_disk_check[0] > 5:      # обращение к ФС — реже
-                last_disk_check[0] = now
-                try:
-                    free_mb = shutil.disk_usage(config.DOWNLOAD_DIR).free / 1048576
-                except OSError:
-                    free_mb = None
-                if free_mb is not None and free_mb < config.MIN_FREE_DISK_MB:
-                    task.error = "На сервере закончилось место"
-                    task.cancel.set()
-                    raise yt_dlp.utils.DownloadCancelled()
-
-            st = d.get("status")
-            if st == "downloading":
-                task.status = "downloading"
-                total = d.get("total_bytes") or d.get("total_bytes_estimate")
-                task.total_bytes = total
-                done = d.get("downloaded_bytes", 0)
-                if total:
-                    task.percent = round(done / total * 100, 1)
-                # EMA скорости: сильное сглаживание, чтобы таймер не прыгал.
-                sp = d.get("speed")
-                if sp and sp > 0:
-                    ema_speed[0] = (sp if ema_speed[0] is None
-                                    else ema_speed[0] * 0.8 + sp * 0.2)
-                task.speed = ema_speed[0] or sp
-                # «Осталось» считаем от сглаженной скорости, а не мгновенной.
-                if task.speed and total and total > done:
-                    task.eta = int((total - done) / task.speed)
-                else:
-                    task.eta = d.get("eta")
-            elif st == "finished":
-                # скачивание завершено, дальше возможен постпроцессинг (merge/mp3)
-                task.percent = 100
-                task.status = "processing"
-        return hook
-
-    def _run(self, task: Task) -> None:
-        try:
-            if task.cancel.is_set():
-                task.status = "cancelled"
-                return
-            if task.images_mode:
-                # Пост-галерея (Instagram/Twitter): качаем сами картинки, а не
-                # видео. Несколько -> ZIP через общий bundle ниже.
-                final = self._download_images(task)
-            else:
-                fmt, extra = task.fmt, task.extra
-                opts = {
-                    "paths": {"home": str(config.DOWNLOAD_DIR)},
-                    # Имя на диске задаём сами: только id задачи. Так оно не
-                    # зависит от заголовка (кириллица, эмодзи, точки) и не может
-                    # содержать разделителей пути. Красивое имя пользователь
-                    # получает через download_name при отдаче.
-                    "outtmpl": {"default": f"{task.id}.%(ext)s"},
-                    "noplaylist": True,
-                    "quiet": True,
-                    "no_warnings": True,
-                    "noprogress": True,   # не писать активность пользователя в лог
-                    "consoletitle": False,
-                    "socket_timeout": 30,
-                    # Устойчивость к транзиентным сбоям googlevideo (TLS-таймаут
-                    # фрагмента иначе ронял всю загрузку на середине).
-                    "retries": 10,
-                    "fragment_retries": 20,
-                    "file_access_retries": 5,
-                    "concurrent_fragment_downloads": config.CONCURRENT_FRAGMENTS,
-                    "logger": _QuietLogger(),
-                    **({"proxy": self._task_proxy(task)}
-                       if self._task_proxy(task) else {}),
-                    # Эфир пишем в MPEG-TS: такой контейнер остаётся
-                    # проигрываемым, даже если запись оборвать на середине (нет
-                    # moov-атома, как у mp4). Это и делает «стоп и сохранить».
-                    **({"hls_use_mpegts": True} if task.is_live else {}),
-                    "format": fmt,
-                    "max_filesize": config.MAX_FILESIZE_MB * 1024 * 1024,
-                    "progress_hooks": [self._make_hook(task)],
-                    **extra,
-                }
-                with yt_dlp.YoutubeDL(opts) as ydl:
-                    info = ydl.extract_info(task.url, download=True)
-                    # итоговый файл (учёт смены расширения постпроцессором)
-                    final = None
-                    reqs = (info.get("requested_downloads") or []) if isinstance(info, dict) else []
-                    if reqs:
-                        final = reqs[0].get("filepath")
-                    if not final:
-                        final = ydl.prepare_filename(info)
-                        # постпроцессор аудио меняет расширение
-                        for pp in task.extra.get("postprocessors") or []:
-                            if pp.get("key") == "FFmpegExtractAudio":
-                                pref = pp.get("preferredcodec")
-                                if pref in (None, "best"):
-                                    # «Оригинал» не меняет расширение — угадать
-                                    # его нельзя, ищем файл задачи на диске.
-                                    found = sorted(
-                                        config.DOWNLOAD_DIR.glob(f"{task.id}.*"))
-                                    final = str(found[0]) if found else final
-                                else:
-                                    ext = {"aac": "m4a"}.get(pref, pref)
-                                    final = os.path.splitext(final)[0] + f".{ext}"
-                                break
-            if task.cancel.is_set():
-                task.status = "cancelled"
-                self._cleanup_partials(task)
-                return
-            if task.cancel.is_set():
-                # Отмена могла прийти уже после последнего хука. Публиковать
-                # такую загрузку в ленту и засчитывать её нельзя: пользователь
-                # нажал «Отмена» и получил подтверждение.
-                task.status = "cancelled"
-                self._cleanup_partials(task)
-                return
-            # Обрезка отрезка после полного скачивания (YouTube: HLS не даёт
-            # частично скачать секцию). ffmpeg-copy без перекодирования.
-            if task.clip and final and os.path.exists(final):
-                task.status = "processing"
-                final = self._trim_file(final, task.clip) or final
-            # Несколько выходных файлов (обложка/описание отдельно, дорожки
-            # без склейки) не влезают в отдачу «один файл» — пакуем в ZIP.
-            if task.bundle:
-                final = self._bundle_outputs(task) or final
-            if final and os.path.exists(final):
-                task.filename = os.path.basename(final)          # <id>.<ext>
-                ext = os.path.splitext(final)[1]
-                task.display_name = pretty_filename(task.title, ext)
-                task.filesize = os.path.getsize(final)
-                task.percent = 100
-                task.status = "finished"
-            else:
-                task.error = "Файл не найден после скачивания"
-                task.status = "error"
-        except yt_dlp.utils.DownloadCancelled:
-            # Для эфира ручная остановка (без ошибки сторожа) означает
-            # «сохранить записанное», а не выбросить. Сторож же ставит
-            # task.error и обрывает — тогда чистим, как обычную ошибку.
-            saved = (self._finalize_partial(task)
-                     if task.is_live and not task.error else None)
-            if saved:
-                task.filename = os.path.basename(saved)
-                ext = os.path.splitext(saved)[1]
-                task.display_name = pretty_filename(task.title, ext)
-                task.filesize = os.path.getsize(saved)
-                task.percent = 100
-                task.status = "finished"
-            else:
-                # Сторож мог прервать загрузку по размеру или нехватке места —
-                # тогда это ошибка с причиной, а не тихая отмена пользователем.
-                task.status = "error" if task.error else "cancelled"
-                self._cleanup_partials(task)
-        except (yt_dlp.utils.DownloadError,
-                yt_dlp.utils.UnavailableVideoError) as e:
-            # осмысленное сообщение самого yt-dlp — показываем очищенным
-            # Текст ПЕРЕД статусом: клиент закрывает поток по терминальному
-            # статусу и успевал прочитать «Ошибка: » без причины.
-            task.error = _clean_err(str(e))
-            task.status = "error"
-            logging.warning("загрузка не удалась (%s): %s",
-                            _host_of(task.url), type(e).__name__)
-        except Exception:
-            # что угодно иное — внутренняя ошибка; наружу её текст не отдаём
-            task.error = "Внутренняя ошибка, попробуйте другой формат"
-            task.status = "error"
-            logging.exception("внутренний сбой задачи (%s)", _host_of(task.url))
-        finally:
-            task.completed = True
-            # Уборка на ВСЕХ путях выхода. Раньше она была только в ветке
-            # отмены, а самый частый исход в проде — сетевой сбой, 403 или
-            # падение ffmpeg — оставлял до двух потолков размера мусора на
-            # FILE_TTL. Он считается в квоте, и сервис начинал отвечать
-            # «нет места» здоровым пользователям.
-            if task.status != "finished":
-                self._cleanup_partials(task)
-            if self.on_complete:
-                try:
-                    self.on_complete(task)
-                except Exception:      # статистика не должна ломать загрузку
-                    pass
-
-    def _trim_file(self, path: str, clip: tuple) -> str | None:
-        """Вырезать отрезок [start,end] из готового файла через ffmpeg -c copy.
-
-        Быстрая резка без перекодирования; -ss до -i садится на ближайший
-        ключевой кадр. Возвращает путь к обрезанному файлу (заменяет исходный)
-        или None при неудаче (тогда останется целый файл).
-        """
-        start, end = clip
-        root, ext = os.path.splitext(path)
-        out = f"{root}.clip{ext}"
-        cmd = ["ffmpeg", "-y", "-ss", f"{start:.3f}", "-i", path]
-        if end is not None:
-            cmd += ["-t", f"{end - start:.3f}"]
-        cmd += ["-map", "0", "-c", "copy", "-avoid_negative_ts", "make_zero"]
-        if ext.lower() in (".mp4", ".m4a", ".mov"):
-            cmd += ["-movflags", "+faststart"]
-        cmd.append(out)
-        try:
-            r = subprocess.run(cmd, stdin=subprocess.DEVNULL,
-                               stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL,
-                               timeout=600)
-        except (OSError, subprocess.SubprocessError):
-            return None
-        if r.returncode != 0 or not os.path.exists(out) or os.path.getsize(out) == 0:
-            try:
-                os.path.exists(out) and os.unlink(out)
-            except OSError:
-                pass
-            return None
-        try:
-            os.replace(out, path)   # обрезанный занимает место исходного
-        except OSError:
-            return out
-        return path
-
+    # ---- выполнение задачи в отдельном процессе ----
     def _task_proxy(self, task: Task) -> str | None:
         """Прокси для задачи: запасной egress при бане, иначе основной PROXY."""
         if task.use_egress and config.EGRESS_PROXY:
             return config.EGRESS_PROXY
         return config.PROXY or None
 
-    def _download_images(self, task: Task) -> str | None:
-        """Скачать картинки поста-галереи напрямую (Instagram/Twitter и т.п.).
-
-        Возвращает путь к первому файлу; если картинок несколько, общий bundle
-        ниже упакует их в ZIP. Адреса берём заново из yt-dlp (доверенный
-        источник), а не от клиента.
-        """
-        task.status = "downloading"
-        proxy = self._task_proxy(task)
-        opts = {
-            "quiet": True, "no_warnings": True, "skip_download": True,
-            "ignore_no_formats_error": True, "socket_timeout": 30,
-            "logger": _QuietLogger(),
-            **({"proxy": proxy} if proxy else {}),
+    def _spec(self, task: Task) -> dict:
+        return {
+            "id": task.id, "url": task.url, "title": task.title,
+            "fmt": task.fmt, "extra": task.extra, "is_live": task.is_live,
+            "images_mode": task.images_mode, "bundle": task.bundle,
+            "proxy": self._task_proxy(task),
+            "clip": list(task.clip) if task.clip else None,
         }
-        with yt_dlp.YoutubeDL(opts) as ydl:
-            info = ydl.sanitize_info(ydl.extract_info(task.url, download=False))
-        urls = collect_images(info)
-        if not urls:
-            task.error = "В посте не найдено изображений"
-            return None
-        from curl_cffi import requests as _cffi   # импортируется лениво
-        img_proxies = {"http": proxy, "https": proxy} if proxy else None
-        total = saved = 0
-        for i, u in enumerate(urls, 1):
+
+    def _spawn(self, task: Task) -> subprocess.Popen:
+        # Своя группа процессов: при жёсткой остановке сигнал получает и
+        # ffmpeg, запущенный yt-dlp, а не только сам исполнитель.
+        return subprocess.Popen(
+            [sys.executable, "-m", "jobrunner"],
+            cwd=str(config.BASE_DIR),
+            stdin=subprocess.PIPE, stdout=subprocess.PIPE, stderr=None,
+            start_new_session=True, text=True, encoding="utf-8", bufsize=1,
+        )
+
+    @staticmethod
+    def _kill_group(proc: subprocess.Popen, sig: int) -> None:
+        try:
+            os.killpg(proc.pid, sig)
+        except (ProcessLookupError, PermissionError):
+            pass
+
+    def _apply_event(self, task: Task, ev: dict) -> dict | None:
+        """Применить событие исполнителя к задаче. Возвращает итог (done)."""
+        kind = ev.get("ev")
+        if kind == "status" and ev.get("status") in ("preparing", "downloading",
+                                                     "processing"):
+            task.status = ev["status"]
+        elif kind == "progress":
+            for key in ("percent", "speed", "eta"):
+                setattr(task, key, ev.get(key))
+            task.total_bytes = ev.get("total")
+        elif kind == "done":
+            return ev
+        return None
+
+    def _execute(self, task: Task) -> dict:
+        """Запустить исполнителя и сопровождать его до конца.
+
+        Сторожит три вещи: отмену пользователем (SIGTERM, затем SIGKILL
+        группы), отсутствие прогресса дольше STALL_SEC (источник завис) и
+        общее время обработки. Возвращает итоговое событие done.
+        """
+        proc = self._spawn(task)
+        try:
+            proc.stdin.write(json.dumps(self._spec(task), ensure_ascii=False) + "\n")
+            proc.stdin.close()
+        except (BrokenPipeError, OSError):
+            pass
+        sel = selectors.DefaultSelector()
+        sel.register(proc.stdout, selectors.EVENT_READ)
+        last_activity = time.monotonic()
+        term_sent_at: float | None = None
+        killed_reason: str | None = None
+        result: dict | None = None
+        try:
+            while True:
+                if sel.select(timeout=1.0):
+                    line = proc.stdout.readline()
+                    if not line:
+                        break                                  # EOF: процесс вышел
+                    try:
+                        ev = json.loads(line)
+                    except ValueError:
+                        continue
+                    last_activity = time.monotonic()
+                    done = self._apply_event(task, ev)
+                    if done is not None:
+                        result = done
+                now = time.monotonic()
+                # Отмена: сначала просим (эфир успеет сохранить записанное),
+                # не послушался — останавливаем принудительно.
+                if task.cancel.is_set() and term_sent_at is None:
+                    self._kill_group(proc, signal.SIGTERM)
+                    term_sent_at = now
+                elif term_sent_at is not None and now - term_sent_at > config.CANCEL_GRACE_SEC:
+                    self._kill_group(proc, signal.SIGKILL)
+                    killed_reason = killed_reason or "cancel"
+                # Сторож зависаний. Пока идёт склейка/перекодирование, событий
+                # нет законно, поэтому у этой фазы свой, больший предел.
+                limit = (config.PROCESSING_TIMEOUT_SEC if task.status == "processing"
+                         else config.STALL_SEC)
+                if term_sent_at is None and now - last_activity > limit:
+                    task.error = ("Источник перестал отдавать данные — "
+                                  "попробуйте ещё раз позже")
+                    task.cancel.set()
+                    killed_reason = "stall"
+        finally:
+            sel.close()
+            try:
+                proc.wait(timeout=config.CANCEL_GRACE_SEC)
+            except subprocess.TimeoutExpired:
+                self._kill_group(proc, signal.SIGKILL)
+                proc.wait()
+            # Процесс мог выйти, а его ffmpeg — ещё нет.
+            self._kill_group(proc, signal.SIGKILL)
+            proc.stdout.close()
+
+        if result is not None:
+            return result
+        if killed_reason == "stall":
+            return {"status": "error", "error": task.error}
+        if task.cancel.is_set():
+            # Остановлен без итога: для эфира сохраняем записанное.
+            if task.is_live and not task.error:
+                saved = finalize_partial(task.id)
+                if saved:
+                    return {"status": "finished", "filename": os.path.basename(saved)}
+            return {"status": "error", "error": task.error} if task.error \
+                else {"status": "cancelled"}
+        logging.error("исполнитель задачи завершился без итога (код %s, %s)",
+                      proc.returncode, _host_of(task.url))
+        return {"status": "error", "error": "Внутренняя ошибка, попробуйте ещё раз"}
+
+    def _run(self, task: Task) -> None:
+        try:
             if task.cancel.is_set():
-                raise yt_dlp.utils.DownloadCancelled()
-            try:
-                r = _cffi.get(u, impersonate="chrome", timeout=30,
-                              proxies=img_proxies)
-            except Exception:
-                continue
-            if getattr(r, "status_code", 0) != 200:
-                continue
-            data = r.content or b""
-            if not data:
-                continue
-            total += len(data)
-            if total > config.MAX_FILESIZE_MB * 1048576:
-                task.error = "Файлы превышают допустимый размер"
-                task.cancel.set()
-                raise yt_dlp.utils.DownloadCancelled()
-            ext = _img_ext(r.headers.get("content-type"), u)
-            # номер с ведущим нулём -> файлы сортируются по порядку карусели
-            p = config.DOWNLOAD_DIR / f"{task.id}.{i:02d}.{ext}"
-            try:
-                p.write_bytes(data)
-                saved += 1
-            except OSError:
-                pass
-            task.percent = round(i / len(urls) * 100, 1)
-        if saved == 0:
-            task.error = task.error or "Не удалось скачать изображения"
-            return None
-        task.bundle = saved > 1
-        task.status = "processing"
-        files = sorted(config.DOWNLOAD_DIR.glob(f"{task.id}.*"))
-        return str(files[0]) if files else None
+                task.status = "cancelled"
+                return
+            result = self._execute(task)
+            status = result.get("status")
+            # Отмена могла прийти уже после последнего события. Публиковать
+            # такую загрузку нельзя: пользователь нажал «Отмена» и получил
+            # подтверждение.
+            if task.cancel.is_set() and not task.is_live and not task.error:
+                status = "cancelled"
+            if status == "finished":
+                path = safe_download_path(result.get("filename") or "")
+                if path is None or not path.name.startswith(task.id):
+                    task.error, task.status = "Файл не найден после скачивания", "error"
+                    return
+                task.filename = path.name                     # <id>.<ext>
+                task.display_name = pretty_filename(task.title, path.suffix)
+                task.filesize = path.stat().st_size
+                task.percent = 100
+                task.status = "finished"
+            elif status == "cancelled":
+                task.status = "cancelled"
+            else:
+                # Текст ПЕРЕД статусом: клиент закрывает поток по терминальному
+                # статусу и успевал прочитать «Ошибка: » без причины.
+                task.error = result.get("error") or task.error or "Ошибка скачивания"
+                task.status = "error"
+        except Exception:                                      # noqa: BLE001
+            task.error = "Внутренняя ошибка, попробуйте другой формат"
+            task.status = "error"
+            logging.exception("внутренний сбой задачи (%s)", _host_of(task.url))
+        finally:
+            task.completed = True
+            # Уборка на ВСЕХ путях выхода: мусор от сбоев считается в квоте,
+            # и иначе сервис начинал отвечать «нет места» здоровым людям.
+            if task.status != "finished":
+                cleanup_partials(task.id)
+            if self.on_complete:
+                try:
+                    self.on_complete(task)
+                except Exception:      # статистика не должна ломать загрузку
+                    pass
 
-    def _bundle_outputs(self, task: Task) -> str | None:
-        """Собрать все файлы задачи в один ZIP, если их больше одного.
 
-        Возвращает путь к архиву (или к единственному файлу, если пакуемого
-        оказалось не больше одного). Исходные файлы после упаковки удаляем.
-        """
-        files = [p for p in sorted(config.DOWNLOAD_DIR.glob(f"{task.id}.*"))
-                 if p.suffix.lower() not in {".part", ".ytdl", ".temp"}
-                 and ".part-" not in p.name]
-        if len(files) <= 1:
-            return str(files[0]) if files else None
-        zpath = config.DOWNLOAD_DIR / f"{task.id}.zip"
-        stem = pretty_filename(task.title, "")
-        used: set[str] = set()
-        # ZIP_STORED: медиа уже сжато, а хост — гипервизор; не тратим CPU
-        # соседних ВМ на бесполезную компрессию.
-        with zipfile.ZipFile(zpath, "w", zipfile.ZIP_STORED) as z:
-            for p in files:
-                ext = p.suffix or ""
-                arc = f"{stem}{ext}"
-                n = 1
-                while arc in used:
-                    n += 1
-                    arc = f"{stem} ({n}){ext}"
-                used.add(arc)
-                z.write(p, arcname=arc)
-        for p in files:
-            try:
-                p.unlink()
-            except OSError:
-                pass
-        return str(zpath)
+# ---- файлы задачи на диске ----
+_PARTIAL_SUFFIXES = {".part", ".ytdl", ".temp"}
 
-    def _finalize_partial(self, task: Task) -> str | None:
-        """Превратить прерванную запись эфира в готовый файл.
 
-        Берём самый крупный кусок задачи и снимаем суффикс .part. Для эфира
-        в MPEG-TS такой файл остаётся проигрываемым.
-        """
-        best = None
-        best_size = 0
-        for p in config.DOWNLOAD_DIR.glob(f"{task.id}.*"):
-            if p.suffix in (".ytdl", ".temp"):
-                continue
-            try:
-                sz = p.stat().st_size
-            except OSError:
-                continue
-            if sz > best_size:
-                best, best_size = p, sz
-        if not best or best_size == 0:
-            return None
-        if best.name.endswith(".part"):
-            final = best.with_name(best.name[:-len(".part")])
-            try:
-                best.replace(final)
-                return str(final)
-            except OSError:
-                return str(best)
-        return str(best)
+def task_files(tid: str) -> list[Path]:
+    """Готовые файлы задачи (без недокачанных кусков), по порядку."""
+    return [p for p in sorted(config.DOWNLOAD_DIR.glob(f"{tid}.*"))
+            if p.is_file() and p.suffix.lower() not in _PARTIAL_SUFFIXES
+            and ".part-" not in p.name]
 
-    def _cleanup_partials(self, task: Task) -> None:
-        # только файлы этой задачи: имена начинаются с её id
-        for p in config.DOWNLOAD_DIR.glob(f"{task.id}.*"):
-            try:
-                p.unlink()
-            except OSError:
-                pass
+
+def cleanup_partials(tid: str) -> None:
+    """Удалить все файлы задачи: имена начинаются с её id."""
+    for p in config.DOWNLOAD_DIR.glob(f"{tid}.*"):
+        try:
+            p.unlink()
+        except OSError:
+            pass
+
+
+def finalize_partial(tid: str) -> str | None:
+    """Превратить прерванную запись эфира в готовый файл: берём самый
+    крупный кусок и снимаем суффикс .part (MPEG-TS остаётся проигрываемым)."""
+    best, best_size = None, 0
+    for p in config.DOWNLOAD_DIR.glob(f"{tid}.*"):
+        if p.suffix in (".ytdl", ".temp"):
+            continue
+        try:
+            sz = p.stat().st_size
+        except OSError:
+            continue
+        if sz > best_size:
+            best, best_size = p, sz
+    if not best:
+        return None
+    if best.name.endswith(".part"):
+        final = best.with_name(best.name[:-len(".part")])
+        try:
+            best.replace(final)
+            return str(final)
+        except OSError:
+            return str(best)
+    return str(best)
 
 
 class Overloaded(Exception):
