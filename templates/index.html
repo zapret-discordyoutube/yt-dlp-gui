@@ -538,6 +538,8 @@ function renderPreview(d) {
   if (gallery) $("#pv-gallery-count").textContent = (d.image_count || 0) + " фото";
   ["mode-seg", "opts-video", "opts-audio", "opts-all", "pp-opts"].forEach(id =>
     $("#" + id).classList.toggle("hidden", gallery));
+  // У фото нет ни отрезка, ни звуковых дорожек.
+  if (gallery) ["clip-row", "alang-row"].forEach(id => $("#" + id).classList.add("hidden"));
   if (!gallery) setMode(settings.mode);
   else { updateExtraRow(); updateSizeEst(); }
   $("#download-label").textContent =
@@ -854,6 +856,12 @@ function renderTask(t) {
   if (t.status === "queued") {
     bar.dataset.state = "indeterminate";
     status.textContent = "В очереди — все слоты заняты, скоро начнём…";
+  } else if ((t.status === "preparing" || t.status === "downloading") && !t.percent && t.phase) {
+    // До первых байт: что именно происходит, а не безликая «подготовка».
+    bar.dataset.state = "indeterminate";
+    status.textContent = t.phase === "bypass"
+      ? "Сервер YouTube заблокирован провайдером — качаем через резервный канал…"
+      : "Подключаемся к серверу YouTube…";
   } else if (t.status === "preparing") {
     bar.dataset.state = "indeterminate";
     status.textContent = "Подготовка — получаем ссылки на файлы…";

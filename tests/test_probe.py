@@ -100,3 +100,22 @@ def test_empty_formats_does_not_crash(probe_with):
 def test_missing_title_gets_placeholder(probe_with):
     out = probe_with({"id": "x", "formats": []})
     assert out["title"] == "Без названия"
+
+
+def test_video_without_formats_is_not_a_gallery(probe_with):
+    """Ролик 18+ без форматов (YouTube требует вход) выдавался за «пост с
+    фото» — предлагалось скачать его обложку."""
+    info = {"id": "x", "title": "Ролик 18+", "duration": 518, "age_limit": 18,
+            "thumbnail": "https://i.ytimg.com/vi/x/hq.jpg",
+            "thumbnails": [{"url": "https://i.ytimg.com/vi/x/hq.jpg"}], "formats": []}
+    with pytest.raises(ValueError, match="age_restricted"):
+        probe_with(info)
+    with pytest.raises(ValueError, match="no_formats"):
+        probe_with({**info, "age_limit": 0})
+
+
+def test_image_post_is_still_a_gallery(probe_with):
+    info = {"id": "p", "title": "Пост", "formats": [],
+            "thumbnails": [{"url": "https://pbs.twimg.com/media/a.jpg"}],
+            "thumbnail": "https://pbs.twimg.com/media/a.jpg"}
+    assert probe_with(info)["is_gallery"] is True

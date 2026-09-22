@@ -614,8 +614,16 @@ def probe(url: str) -> dict:
     formats.sort(key=lambda x: (x["height"] or 0, x["tbr"] or 0), reverse=True)
 
     # Пост без видео, но с картинками -> предлагаем скачать фото (галерея).
+    # Но ролик (есть длительность, или это YouTube) галереей не бывает: у него
+    # форматов нет по другой причине — чаще всего возрастное ограничение, и
+    # раньше такой ролик предлагалось «скачать фото» — его обложку.
     images = collect_images(info)
-    is_gallery = bool(images) and not formats
+    is_video_page = bool(info.get("duration")) or is_youtube(url)
+    is_gallery = bool(images) and not formats and not is_video_page
+    if not formats and is_video_page:
+        if (info.get("age_limit") or 0) >= 18:
+            raise ValueError("age_restricted")
+        raise ValueError("no_formats")
 
     # Языки аудиодорожек (дубляж YouTube). Показываем выбор только если их >1.
     audio_langs, seen_langs = [], set()
@@ -675,6 +683,7 @@ class Task:
     use_egress: bool = False     # качать через запасной egress-прокси (бан)
     clip: tuple | None = None    # (start,end) для пост-обрезки ffmpeg (YouTube)
     status: str = "queued"       # queued|preparing|downloading|processing|finished|error|cancelled
+    phase: str | None = None     # до первых байт: connect | bypass (для подписи в UI)
     percent: float | None = None
     speed: float | None = None
     eta: int | None = None
@@ -700,6 +709,7 @@ class Task:
             "thumbnail": self.thumbnail,
             "is_live": self.is_live,
             "status": self.status,
+            "phase": self.phase,
             "percent": self.percent,
             "speed": self.speed,
             "eta": self.eta,
@@ -1014,7 +1024,11 @@ class DownloadManager:
             if task.status == "downloading":
                 tm.setdefault("_first_byte", now)
                 tm["_dl_end"] = now
+        elif kind == "phase" and ev.get("phase") in ("connect", "bypass"):
+            task.phase = ev["phase"]
         elif kind == "progress":
+            if (ev.get("percent") or 0) > 0:
+                task.phase = None                  # пошли байты — фаза не нужна
             if task.status == "downloading":
                 tm.setdefault("_first_byte", now)
                 tm["_dl_end"] = now

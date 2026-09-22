@@ -224,6 +224,11 @@ def api_info():
             return err(f"Слишком длинное видео (лимит {config.MAX_DURATION_SEC // 3600} ч)")
         if str(e) == "upcoming":
             return err("Эфир ещё не начался — попробуйте, когда трансляция пойдёт")
+        if str(e) == "age_restricted":
+            return err("Видео с возрастным ограничением: YouTube отдаёт его только "
+                       "после входа в аккаунт, а сервис работает без аккаунтов")
+        if str(e) == "no_formats":
+            return err("Источник не отдал ни одного формата для скачивания")
         return err("Не удалось разобрать ссылку")
     except dl.yt_dlp.utils.DownloadError as e:
         return err(dl._clean_err(str(e)))
