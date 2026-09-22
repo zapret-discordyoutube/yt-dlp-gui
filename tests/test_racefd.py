@@ -208,3 +208,14 @@ def test_blocked_server_gets_banned(server, tmp_path, fresh_racefd, monkeypatch)
         close()
     assert hostban.is_banned(racefd.urlparse(dead_url).netloc)
     assert not hostban.is_banned(racefd.urlparse(server).netloc)
+
+
+def test_score_prefers_fast_and_demotes_slow(fresh_racefd, monkeypatch):
+    """Медленный (<1 МБ/с) сервер ниже, быстрый (>5 МБ/с) выше; забаненный — последний."""
+    monkeypatch.setattr(racefd, "_speed", {"slow:1": 0.5, "fast:1": 6.0})
+    racefd._HOSTS.update({"slow:1": [5, 0], "fast:1": [5, 0], "new:1": [0, 0]})
+    s = racefd._host_score
+    assert s("http://fast:1/v") > s("http://new:1/v") > s("http://slow:1/v")
+    hostban.ban("fast:1")
+    assert s("http://fast:1/v") < s("http://slow:1/v")
+    hostban.clear("fast:1")

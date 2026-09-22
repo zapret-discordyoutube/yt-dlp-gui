@@ -37,6 +37,10 @@ def _conn() -> sqlite3.Connection:
         c.execute("PRAGMA busy_timeout=5000")
         c.execute("CREATE TABLE IF NOT EXISTS banned ("
                   " ip TEXT PRIMARY KEY, until REAL NOT NULL, since REAL NOT NULL)")
+        # Средняя скорость одного соединения с сервером (МБ/с): по ней загрузки
+        # выбирают, с какого сервера качать. Устаревает за RATE_TTL_SEC.
+        c.execute("CREATE TABLE IF NOT EXISTS rate ("
+                  " ip TEXT PRIMARY KEY, mbps REAL NOT NULL, at REAL NOT NULL)")
         _local.conn = c
     return c
 
@@ -87,6 +91,41 @@ def banned() -> frozenset:
 
 def is_banned(ip: str | None) -> bool:
     return bool(ip) and ip in banned()
+
+
+RATE_TTL_SEC = 900
+_rates: dict = {"at": 0.0, "map": {}}
+
+
+def rate_put(ip: str, mbps: float) -> None:
+    """Записать скорость соединения с сервером (сглаженно с прошлой)."""
+    if not ip or mbps <= 0:
+        return
+    now = time.time()
+    try:
+        _conn().execute(
+            "INSERT INTO rate(ip, mbps, at) VALUES (?, ?, ?) ON CONFLICT(ip) DO UPDATE SET "
+            "mbps = CASE WHEN ? - at > ? THEN excluded.mbps "
+            "            ELSE mbps * 0.6 + excluded.mbps * 0.4 END, at = excluded.at",
+            (ip, mbps, now, now, RATE_TTL_SEC))
+    except sqlite3.Error:
+        pass
+
+
+def rate_get(ip: str | None) -> float | None:
+    """Свежая средняя скорость сервера, МБ/с, или None, если не знаем."""
+    if not ip:
+        return None
+    now = time.time()
+    with _cache_lock:
+        if now - _rates["at"] >= CACHE_SEC:
+            try:
+                rows = _conn().execute("SELECT ip, mbps FROM rate WHERE at > ?",
+                                       (now - RATE_TTL_SEC,)).fetchall()
+                _rates.update(at=now, map=dict(rows))
+            except sqlite3.Error:
+                _rates.update(at=now, map={})
+        return _rates["map"].get(ip)
 
 
 def listing() -> list[tuple[str, float, float]]:
