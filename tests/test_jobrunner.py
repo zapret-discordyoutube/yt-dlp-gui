@@ -79,9 +79,15 @@ def test_cancel_stops_hung_job(manager, silent_server, monkeypatch):
     while t.status != "preparing" and time.time() < deadline:
         time.sleep(0.05)
     assert t.status == "preparing", "исполнитель не сообщил о подготовке"
-    t.cancel.set()
+    with manager.lock:
+        manager.tasks[t.id] = t
+    t0 = time.time()
+    assert manager.cancel(t.id)
+    # Отмена видна сразу, ещё до остановки процесса.
+    assert t.status == "cancelled"
     th.join(timeout=15)
     assert not th.is_alive(), "задача не остановилась после отмены"
+    assert time.time() - t0 < 3, "отмена зависшей загрузки заняла слишком долго"
     assert t.status == "cancelled"
 
 
