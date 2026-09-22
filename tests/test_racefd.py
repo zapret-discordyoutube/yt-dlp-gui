@@ -60,6 +60,7 @@ def test_assembles_file_exactly_despite_broken_responses(server, tmp_path, monke
 
 @pytest.mark.parametrize("info,params,expected", [
     ({"protocol": "https", "url": "https://rr1---sn-x.googlevideo.com/videoplayback?clen=99999999"}, {}, True),
+    ({"protocol": "https", "url": "https://rr1---sn-x.googlevideo.com/videoplayback?clen=300000"}, {}, True),
     ({"protocol": "https", "url": "https://rr1---sn-x.googlevideo.com/videoplayback"}, {}, False),   # размер неизвестен
     ({"protocol": "m3u8_native", "url": "https://rr1---sn-x.googlevideo.com/x?clen=99999999"}, {}, False),
     ({"protocol": "https", "url": "https://example.com/v.mp4", "filesize": 99999999}, {}, False),
@@ -67,4 +68,17 @@ def test_assembles_file_exactly_despite_broken_responses(server, tmp_path, monke
      {"proxy": "socks5h://127.0.0.1:1"}, False),                                                     # через прокси — штатно
 ])
 def test_suitable(info, params, expected):
+    """Маленькие файлы тоже наши: штатный загрузчик вешал MP3 короткого ролика."""
     assert racefd.suitable(info, params) is expected
+
+
+def test_single_chunk_file(server, tmp_path, monkeypatch):
+    """Файл меньше куска: все соединения гоняются за одним куском."""
+    small = DATA[:300_000]
+    monkeypatch.setattr(racefd, "READ_TIMEOUT", 2)
+    ydl = yt_dlp.YoutubeDL({"quiet": True, "no_warnings": True})
+    fd = racefd.RaceFD(ydl, {"quiet": True, "noprogress": True})
+    out = tmp_path / "a.m4a"
+    assert fd.real_download(str(out), {"url": server, "filesize": len(small),
+                                       "http_headers": {}})
+    assert out.read_bytes() == small
