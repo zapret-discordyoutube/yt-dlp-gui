@@ -82,3 +82,30 @@ def test_single_chunk_file(server, tmp_path, monkeypatch):
     assert fd.real_download(str(out), {"url": server, "filesize": len(small),
                                        "http_headers": {}})
     assert out.read_bytes() == small
+
+
+def test_switches_to_mirror_when_server_is_blocked(server, tmp_path, monkeypatch):
+    """Сервер «под DPI» (соединения молчат) — загрузчик сам находит тот же
+    файл на другом сервере, как при ручном перезапуске загрузки."""
+    import socket
+    dead = socket.socket()
+    dead.bind(("127.0.0.1", 0))
+    dead.listen(64)                                   # принимает и молчит
+    dead_url = f"http://127.0.0.1:{dead.getsockname()[1]}/videoplayback"
+    monkeypatch.setattr(racefd, "READ_TIMEOUT", 1)
+    monkeypatch.setattr(racefd, "CONNECT_TIMEOUT", 1)
+    monkeypatch.setattr(racefd, "RESOLVE_EVERY", 0.5)
+    asked = []
+    monkeypatch.setattr(racefd, "_fresh_url",
+                        lambda info, size: (asked.append(1), server)[1])
+    ydl = yt_dlp.YoutubeDL({"quiet": True, "no_warnings": True})
+    fd = racefd.RaceFD(ydl, {"quiet": True, "noprogress": True})
+    out = tmp_path / "m.mp4"
+    try:
+        ok = fd.real_download(str(out), {"url": dead_url, "filesize": len(DATA),
+                                         "http_headers": {}, "format_id": "401",
+                                         "webpage_url": "https://www.youtube.com/watch?v=x"})
+    finally:
+        dead.close()
+    assert ok and asked
+    assert out.read_bytes() == DATA
