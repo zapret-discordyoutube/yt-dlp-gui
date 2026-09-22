@@ -516,6 +516,9 @@ _BAN_SIGNATURES = (
     "not available in your region", "geo restricted", "geo-restricted",
     "blocked it in your country", "this content is not available in your",
     "video is not available from your",
+    # YouTube: «Sign in to confirm you're not a bot» — IP сервера попал под
+    # антибот-проверку; с egress-узла тот же ролик открывается.
+    "not a bot",
 )
 
 
@@ -979,9 +982,14 @@ class DownloadManager:
 
     # ---- выполнение задачи в отдельном процессе ----
     def _task_proxy(self, task: Task) -> str | None:
-        """Прокси для задачи: запасной egress при бане, иначе основной PROXY."""
-        if task.use_egress and config.EGRESS_PROXY:
-            return config.EGRESS_PROXY
+        """Прокси для задачи: запасной egress при бане, иначе основной PROXY.
+        YouTube через egress идёт через пул туннелей (racefd раздаёт их
+        потокам): один туннель провайдер режет до ~300 КБ/с."""
+        if task.use_egress:
+            if config.EGRESS_POOL and is_youtube(task.url):
+                return config.EGRESS_POOL[0]
+            if config.EGRESS_PROXY:
+                return config.EGRESS_PROXY
         return config.PROXY or None
 
     def _spec(self, task: Task) -> dict:
