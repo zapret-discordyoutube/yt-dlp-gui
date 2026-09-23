@@ -412,6 +412,27 @@ select.input:hover{background-color:var(--surface-3)}
 .seg--wide button svg{opacity:.7}
 .seg--wide button[aria-checked="true"] svg{opacity:1; color:var(--accent-ink)}
 
+/* Плейлист: список роликов */
+.pl-list{display:flex; flex-direction:column; max-height:560px; overflow-y:auto;
+  border:1px solid var(--border); border-radius:var(--r-md); background:var(--surface-2)}
+.pl-item{display:grid; grid-template-columns:28px 96px minmax(0,1fr) auto; gap:var(--s-3);
+  align-items:center; padding:8px 12px; border:0; border-bottom:1px solid var(--border);
+  background:transparent; color:var(--text); font:500 13.5px/1.35 var(--font-sans);
+  text-align:left; cursor:pointer; transition:background var(--dur-fast) var(--ease)}
+.pl-item:last-child{border-bottom:0}
+.pl-item:hover{background:var(--surface-3)}
+.pl-item:focus-visible{outline:none; box-shadow:inset var(--shadow-focus)}
+.pl-item__n{font:500 12px var(--font-mono); color:var(--text-muted); text-align:right}
+.pl-item__thumb{width:96px; aspect-ratio:16/9; border-radius:6px; overflow:hidden; background:var(--surface-3)}
+.pl-item__thumb img{width:100%; height:100%; object-fit:cover; display:block}
+.pl-item__title{overflow:hidden; display:-webkit-box; -webkit-line-clamp:2; -webkit-box-orient:vertical}
+.pl-item__dur{font:500 12px var(--font-mono); color:var(--text-muted)}
+@media (max-width:640px){
+  .pl-item{grid-template-columns:72px minmax(0,1fr); gap:var(--s-2)}
+  .pl-item__n, .pl-item__dur{display:none}
+  .pl-item__thumb{width:72px}
+}
+
 /* Отрезок: «с [ ] — по [ ]» в одну строку. */
 .clip{display:flex; align-items:center; gap:var(--s-2); flex-wrap:wrap}
 .clip .input{width:130px; text-align:center}

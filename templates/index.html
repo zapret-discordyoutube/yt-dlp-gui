@@ -117,6 +117,18 @@
       </div>
     </section>
 
+    <!-- Плейлист / канал: список роликов, клик — открыть ролик -->
+    <section id="playlist" class="card work hidden">
+      <div class="work__body" style="gap:var(--s-3)">
+        <div>
+          <span class="source">Плейлист</span>
+          <div class="title" id="pl-title" style="margin-top:8px"></div>
+          <div class="meta" id="pl-meta" style="margin-top:4px"></div>
+        </div>
+        <div class="pl-list" id="pl-list" role="list"></div>
+      </div>
+    </section>
+
     <!-- Превью + выбор формата -->
     <section id="preview" class="card work hidden">
       <div class="work__head">
@@ -458,6 +470,7 @@ $("#url-form").addEventListener("submit", async (e) => {
 
   setInvalid(false);
   $("#preview").classList.add("hidden");
+  $("#playlist").classList.add("hidden");
   $("#intro").classList.add("hidden");
   $("#skeleton").classList.remove("hidden");
   const btn = $("#fetch-btn");
@@ -472,8 +485,8 @@ $("#url-form").addEventListener("submit", async (e) => {
     });
     const data = await readJson(r).catch(() => ({}));
     if (!r.ok) throw new Error(data.error || httpMessage(r.status));
-    current = data;
-    renderPreview(data);
+    if (data.is_playlist) { current = null; renderPlaylist(data); }
+    else { current = data; renderPreview(data); }
   } catch (err) {
     $("#fetch-error-text").textContent = err.message;
     setInvalid(true);
@@ -486,7 +499,43 @@ $("#url-form").addEventListener("submit", async (e) => {
   }
 });
 
+/* Плейлист: список роликов. Клик по ролику — подставить ссылку и проверить,
+   дальше всё как с обычным роликом. */
+function renderPlaylist(d) {
+  $("#preview").classList.add("hidden");
+  $("#pl-title").textContent = d.title || "Плейлист";
+  const n = d.count || (d.entries || []).length;
+  $("#pl-meta").textContent = [d.uploader, n ? `${n} роликов` : "",
+    (d.entries || []).length < n ? `показаны первые ${(d.entries || []).length}` : "",
+    "выберите ролик"].filter(Boolean).join(" · ");
+  const list = $("#pl-list");
+  list.innerHTML = "";
+  (d.entries || []).forEach((e, i) => {
+    const u = safeUrl(e.url);
+    if (!u) return;
+    const b = document.createElement("button");
+    b.type = "button";
+    b.className = "pl-item";
+    b.setAttribute("role", "listitem");
+    const th = safeUrl(e.thumbnail);
+    b.innerHTML = `
+      <span class="pl-item__n">${i + 1}</span>
+      <span class="pl-item__thumb">${th ? `<img src="${esc(th)}" alt="" loading="lazy">` : ""}</span>
+      <span class="pl-item__title">${esc(e.title)}</span>
+      <span class="pl-item__dur">${e.duration ? fmtDur(e.duration) : ""}</span>`;
+    b.addEventListener("click", () => {
+      $("#url").value = u;
+      window.scrollTo({ top: 0, behavior: "smooth" });
+      $("#url-form").requestSubmit();
+    });
+    list.appendChild(b);
+  });
+  $("#playlist").classList.remove("hidden");
+  $("#playlist").classList.add("card--enter");
+}
+
 function renderPreview(d) {
+  $("#playlist").classList.add("hidden");
   $("#pv-title").textContent = d.title;
   $("#pv-uploader").textContent = d.uploader || "";
   const src = $("#pv-source");
