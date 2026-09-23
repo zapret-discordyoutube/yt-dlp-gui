@@ -62,6 +62,12 @@ def _parse_pool(raw: str) -> list[str]:
     return out
 
 
+# Отдельный IP для YouTube (выдан хостером): прямые соединения к YouTube идут
+# с него. На основном IP YouTube включил антибот, а новому выдаёт другие,
+# незаблокированные видеосерверы. Адрес поднимает ytgrab-youtube-ip.service.
+# Пусто — YouTube идёт с основного IP.
+YT_SOURCE_IP = os.environ.get("YTG_YT_SOURCE_IP", "").strip()
+
 # Пул SOCKS-туннелей до egress-узла для YouTube, когда все прямые видеосерверы
 # ролика заблокированы (racefd). Задаёт только администратор. Пусто — выкл.
 EGRESS_POOL = _parse_pool(os.environ.get("YTG_EGRESS_POOL", ""))

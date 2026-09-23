@@ -203,6 +203,9 @@ class Job:
         }
         if self.proxy:
             opts["proxy"] = self.proxy
+        elif config.YT_SOURCE_IP and dl.is_youtube(self.url):
+            # YouTube напрямую — со своего IP (ссылки на файлы привязаны к нему).
+            opts["source_address"] = config.YT_SOURCE_IP
         # Эфир пишем в MPEG-TS: он остаётся проигрываемым, даже если запись
         # оборвать на середине (у mp4 не будет moov-атома).
         if self.is_live:

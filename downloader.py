@@ -543,6 +543,9 @@ def _probe_extract(url: str, proxy: str | None) -> dict:
         # без своего логгера yt-dlp печатает ошибки со ссылкой в stderr
         "logger": _QuietLogger(),
         **({"proxy": proxy} if proxy else {}),
+        # YouTube напрямую — со своего IP (config.YT_SOURCE_IP).
+        **({"source_address": config.YT_SOURCE_IP}
+           if not proxy and config.YT_SOURCE_IP and is_youtube(url) else {}),
     }
     with yt_dlp.YoutubeDL(opts) as ydl:
         return ydl.sanitize_info(ydl.extract_info(url, download=False))

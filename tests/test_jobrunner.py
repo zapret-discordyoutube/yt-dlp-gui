@@ -136,3 +136,27 @@ def test_youtube_prefers_https_formats():
     fs = yt.ydl_opts()["format_sort"]
     assert fs.index("res") < fs.index("proto:https")
     assert "format_sort" not in other.ydl_opts()
+
+
+def test_youtube_uses_own_source_ip(monkeypatch):
+    """YouTube напрямую — с отдельного IP; прочие сайты и egress — нет."""
+    import io
+    import jobrunner
+    monkeypatch.setattr(config, "YT_SOURCE_IP", "203.0.113.9")
+    yt = jobrunner.Job({"id": "8" * 32, "url": "https://www.youtube.com/watch?v=x"}, io.StringIO())
+    other = jobrunner.Job({"id": "9" * 32, "url": "https://vimeo.com/1"}, io.StringIO())
+    via_egress = jobrunner.Job({"id": "a" * 32, "url": "https://www.youtube.com/watch?v=x",
+                                "proxy": "socks5://127.0.0.1:18110"}, io.StringIO())
+    assert yt.ydl_opts()["source_address"] == "203.0.113.9"
+    assert "source_address" not in other.ydl_opts()
+    assert "source_address" not in via_egress.ydl_opts()
+
+
+def test_racefd_direct_session_binds_source_ip(monkeypatch):
+    import racefd
+    monkeypatch.setattr(config, "YT_SOURCE_IP", "203.0.113.9")
+    s = racefd._direct_session()
+    ad = s.get_adapter("https://rr1---sn-x.googlevideo.com/videoplayback")
+    assert isinstance(ad, racefd._SourceAdapter) and ad._source_ip == "203.0.113.9"
+    monkeypatch.setattr(config, "YT_SOURCE_IP", "")
+    assert not isinstance(racefd._direct_session().get_adapter("https://x/"), racefd._SourceAdapter)
