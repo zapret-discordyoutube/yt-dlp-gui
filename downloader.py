@@ -528,6 +528,60 @@ def _is_ban_error(msg: str) -> bool:
     return any(s in m for s in _BAN_SIGNATURES)
 
 
+def is_youtube_list(url: str) -> bool:
+    """Ссылка на плейлист или канал YouTube (а не на конкретный ролик)."""
+    if not is_youtube(url):
+        return False
+    p = urlparse(url)
+    q = parse_qs(p.query)
+    if "v" in q or p.path.startswith(("/watch", "/shorts/", "/live/")) or \
+            (p.hostname or "").endswith("youtu.be"):
+        return False
+    return "list" in q or p.path.startswith(("/playlist", "/@", "/channel/", "/c/", "/user/"))
+
+
+PLAYLIST_MAX = 200     # сколько роликов списка показываем
+
+
+def probe_list(url: str) -> dict:
+    """Плейлист/канал: только список роликов, без разбора каждого (быстро).
+    Раньше yt-dlp разбирал ВСЕ ролики списка — минуты «Проверяем…», а
+    потом ошибка «нет форматов»."""
+    opts = {
+        "quiet": True, "no_warnings": True, "skip_download": True,
+        "extract_flat": "in_playlist", "playlistend": PLAYLIST_MAX,
+        "socket_timeout": 30, "logger": _QuietLogger(),
+        **({"source_address": config.YT_SOURCE_IP} if config.YT_SOURCE_IP else {}),
+    }
+    with yt_dlp.YoutubeDL(opts) as ydl:
+        info = ydl.sanitize_info(ydl.extract_info(url, download=False))
+    entries = []
+    for e in info.get("entries") or []:
+        if not isinstance(e, dict):
+            continue
+        vid = e.get("id")
+        u = e.get("url") or e.get("webpage_url")
+        if vid and not (u or "").startswith("http"):
+            u = f"https://www.youtube.com/watch?v={vid}"
+        if not u or not u.startswith("https://"):
+            continue
+        thumbs = e.get("thumbnails") or []
+        entries.append({
+            "url": u,
+            "title": (e.get("title") or "Без названия")[:200],
+            "duration": e.get("duration"),
+            "thumbnail": (thumbs[-1].get("url") if thumbs else None),
+        })
+    return {
+        "is_playlist": True,
+        "title": info.get("title") or "Плейлист",
+        "uploader": info.get("uploader") or info.get("channel"),
+        "count": info.get("playlist_count") or len(entries),
+        "entries": entries,
+        "webpage_url": info.get("webpage_url") or url,
+    }
+
+
 def _probe_extract(url: str, proxy: str | None) -> dict:
     opts = {
         "quiet": True,
@@ -597,6 +651,8 @@ def cached_info(url: str, via_egress: bool) -> dict | None:
 
 
 def probe(url: str) -> dict:
+    if is_youtube_list(url):
+        return probe_list(url)
     # Прямой доступ; при бане (IP-блок/гео/403) — повтор через egress-прокси.
     via_egress = False
     try:

@@ -161,3 +161,39 @@ def test_info_cache_is_bounded(monkeypatch):
     for i in range(5):
         dl.cache_info((f"https://example.com/v{i}",), False, {"formats": [1]})
     assert len(dl._info_cache) == 3
+
+
+@pytest.mark.parametrize("url,expected", [
+    ("https://www.youtube.com/playlist?list=PLabc", True),
+    ("https://www.youtube.com/@channel/videos", True),
+    ("https://www.youtube.com/watch?v=x&list=PLabc", False),   # конкретный ролик
+    ("https://youtu.be/x?list=PLabc", False),
+    ("https://www.youtube.com/shorts/x", False),
+    ("https://vimeo.com/showcase/1", False),
+])
+def test_is_youtube_list(url, expected):
+    assert dl.is_youtube_list(url) is expected
+
+
+def test_playlist_probe_lists_entries_fast(monkeypatch):
+    """Плейлист — только список роликов (без разбора каждого), со ссылками."""
+    flat = {"_type": "playlist", "title": "Курс", "uploader": "Автор", "playlist_count": 3,
+            "entries": [{"id": "a1", "url": "https://www.youtube.com/watch?v=a1",
+                         "title": "Первый", "duration": 60},
+                        {"id": "b2", "title": "Второй"},                 # без url — соберём по id
+                        {"id": None, "url": "javascript:alert(1)"}]}    # мусор — отбросить
+    seen = {}
+
+    class Y(FakeYDL):
+        def __init__(self, opts):
+            seen.update(opts)
+            super().__init__(flat)
+
+        def __call__(self, opts):
+            return Y(opts)
+    monkeypatch.setattr(dl.yt_dlp, "YoutubeDL", lambda opts: Y(opts))
+    out = dl.probe("https://www.youtube.com/playlist?list=PLx")
+    assert out["is_playlist"] and out["count"] == 3
+    assert [e["url"] for e in out["entries"]] == ["https://www.youtube.com/watch?v=a1",
+                                                  "https://www.youtube.com/watch?v=b2"]
+    assert seen.get("extract_flat") == "in_playlist"
