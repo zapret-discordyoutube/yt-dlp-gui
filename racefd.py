@@ -35,8 +35,17 @@ import config
 import hostban
 
 CHUNK = 1 << 20          # 1 МиБ на запрос
+# Большие файлы — кусками по 4 МиБ. YouTube ограничивает частоту запросов к
+# одной ссылке: куски по 1 МиБ на быстром канале — десятки запросов в секунду,
+# и сервер отвечает 401. Замер на 4K: 1 МиБ × 32 — 2 МБ/с и 1408 отказов из
+# 1509; 4 МиБ × 16 — 99 МБ/с без единого отказа.
+CHUNK_BIG = 4 << 20
+# Отказы «слишком часто» — пауза подольше, а не новая попытка сразу.
+RATE_LIMIT_CODES = ("HTTP 401", "HTTP 429")
+RATE_LIMIT_PAUSE = 2.0
 WORKERS = 12             # соединений на файл
-WORKERS_BIG = 32         # на большой файл (4K и т.п.): и напрямую, и через egress-пул (32 туннеля)
+WORKERS_BIG = 16         # на большой файл (4K и т.п.) напрямую: больше — упор в лимит запросов
+WORKERS_EGRESS_BIG = 32  # на большой файл целиком через egress-пул — по туннелю на поток
 BIG_FILE = 64 << 20      # от какого размера файл «большой»
 CONNECT_TIMEOUT = 3      # TCP+TLS: повисшее рукопожатие бросаем
 MAX_BACKOFF = 2.0        # пауза перед новой попыткой после неудачи
@@ -352,7 +361,8 @@ class RaceFD(FileDownloader):
 
         fd = os.open(tmp, os.O_WRONLY | os.O_CREAT | os.O_TRUNC, 0o644)
         os.ftruncate(fd, size)
-        n_chunks = (size + CHUNK - 1) // CHUNK
+        chunk = CHUNK_BIG if size >= BIG_FILE else CHUNK
+        n_chunks = (size + chunk - 1) // chunk
         todo: queue.Queue = queue.Queue()
         for i in range(n_chunks):
             todo.put(i)
@@ -438,8 +448,8 @@ class RaceFD(FileDownloader):
                         continue
                     with lock:
                         inflight[i] = inflight.get(i, 0) + 1
-                    start = i * CHUNK
-                    end = min(size, start + CHUNK) - 1
+                    start = i * chunk
+                    end = min(size, start + chunk) - 1
                     t_req = time.monotonic()
                     mr = mirrors[m]
                     try:
@@ -509,9 +519,9 @@ class RaceFD(FileDownloader):
                         # Короткая пауза: DPI то пускает новые соединения,
                         # то нет, и долгое ожидание (раньше до 8 с) оставляло
                         # большинство потоков простаивать, когда он снова
-                        # начинал пускать.
+                        # начинал пускать. На отказ «слишком часто» — дольше.
                         backoff = min(MAX_BACKOFF, backoff * 2 or 0.5)
-                        stop.wait(backoff)
+                        stop.wait(RATE_LIMIT_PAUSE if str(e) in RATE_LIMIT_CODES else backoff)
                     finally:
                         with lock:
                             inflight[i] -= 1
@@ -520,7 +530,8 @@ class RaceFD(FileDownloader):
             finally:
                 slot.busy = False
 
-        slots = _take_slots(WORKERS_BIG if size >= BIG_FILE else WORKERS)
+        slots = _take_slots(WORKERS if size < BIG_FILE
+                            else WORKERS_EGRESS_BIG if egress_only else WORKERS_BIG)
         threads = [threading.Thread(target=worker, args=(s, n), daemon=True)
                    for n, s in enumerate(slots)]
         resolving = threading.Event()
