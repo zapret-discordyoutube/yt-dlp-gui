@@ -71,12 +71,36 @@ MAX_FAILS = 5000         # подряд неудач у всех соедине�
                          # при 16 потоках набирал старые 400 неудач меньше чем за минуту
 
 
+class _SourceAdapter(requests.adapters.HTTPAdapter):
+    """Соединения с заданного адреса-источника (свой IP для YouTube)."""
+
+    def __init__(self, source_ip: str, **kwargs) -> None:
+        self._source_ip = source_ip
+        super().__init__(**kwargs)
+
+    def init_poolmanager(self, *args, **kwargs):
+        kwargs["source_address"] = (self._source_ip, 0)
+        return super().init_poolmanager(*args, **kwargs)
+
+
+def _direct_session() -> requests.Session:
+    """Сессия для прямых соединений с видеосерверами — с IP для YouTube,
+    если он задан (ссылки на файлы привязаны к IP, с которого их получили).
+    Egress-сессии сюда не относятся: они ходят в локальный SOCKS."""
+    s = requests.Session()
+    if config.YT_SOURCE_IP:
+        ad = _SourceAdapter(config.YT_SOURCE_IP)
+        s.mount("https://", ad)
+        s.mount("http://", ad)
+    return s
+
+
 class _Slot:
     """Соединение-«слот». Живёт весь процесс: хорошее соединение, раз
     пробившись, обслуживает и видео, и звук задачи."""
 
     def __init__(self) -> None:
-        self.session = requests.Session()
+        self.session = _direct_session()
         self.busy = False          # занят потоком (в т.ч. брошенным)
 
     def renew(self) -> None:
@@ -84,7 +108,7 @@ class _Slot:
             self.session.close()
         except Exception:          # noqa: BLE001
             pass
-        self.session = requests.Session()
+        self.session = _direct_session()
 
 
 # Знания о серверах — на весь процесс (= на задачу), общие для всех дорожек:
@@ -656,8 +680,11 @@ def _fresh_url(info: dict, size: int, proxy: str | None = None) -> str | None:
                                "socket_timeout": 15,
                                # Через egress — по IPv4: IPv6-путь узла до
                                # Google медленный (см. jobrunner._force_ipv4).
+                               # Напрямую — со своего IP для YouTube.
                                **({"proxy": proxy, "source_address": "0.0.0.0"}
-                                  if proxy else {})}) as ydl:
+                                  if proxy else
+                                  {"source_address": config.YT_SOURCE_IP}
+                                  if config.YT_SOURCE_IP else {})}) as ydl:
             data = ydl.extract_info(page, download=False, process=False)
             data = ydl.sanitize_info(data)
     except Exception:                                   # noqa: BLE001

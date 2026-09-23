@@ -76,6 +76,27 @@ SNI-DPI, не блокировка IP.
 - Проверка после добавления: `openssl s_client -connect <ip>:443 -servername
   <host> </dev/null` должен дать `CONNECTED`; затем `yt-dlp --simulate <url>`.
 
+## YouTube: отдельный IP <IP_ДЛЯ_YOUTUBE> (главное)
+
+Хостер (SERV.HOST, после обращения 22.09.2026) выдал дополнительный IP
+**<IP_ДЛЯ_YOUTUBE>** «для доступа к YouTube». Весь прямой трафик к YouTube (разбор в
+`probe`, загрузка в jobrunner, racefd и его повторные разборы) идёт с него
+(`YTG_YT_SOURCE_IP` в юните сервиса; пусто — выкл). Остальные сайты — с
+основного <ОСНОВНОЙ_IP_ХОСТА>.
+
+- На основном IP YouTube держит антибот («not a bot»), на новом — нет.
+- Новому IP YouTube выдаёт другие кластеры видеосерверов (напр. `sn-n8v7znz7`),
+  которые провайдер не режет; 8 соединений кусками — ~100 МБ/с. Серверы, что
+  провайдер режет по адресу назначения, заблокированы и с нового IP — обходы
+  ниже (racefd, hostban, egress-пул) остаются страховкой.
+- Адрес на хосте: `ytgrab-youtube-ip.service` (`ip addr replace <IP_ДЛЯ_YOUTUBE>/32
+  dev vmbr0`, маршруты и мосты не трогает) + `ytgrab-youtube-ip-check.timer`
+  раз в 5 мин возвращает адрес, если его сняла перезагрузка сети Proxmox
+  (ifreload убирает адреса, которых нет в /etc/network/interfaces — сам
+  interfaces намеренно не правили: ошибка там оставит гипервизор без сети).
+- Проверка: `curl --interface <IP_ДЛЯ_YOUTUBE> https://ipinfo.io/ip` → <IP_ДЛЯ_YOUTUBE>;
+  `yt-dlp --source-address <IP_ДЛЯ_YOUTUBE> --simulate <ролик>` → без «not a bot».
+
 ## YouTube: замедление googlevideo и свой загрузчик (racefd.py)
 
 Сами ролики YouTube отдают серверы `rr*---sn-*.googlevideo.com`. Провайдерский
