@@ -156,7 +156,7 @@ def security_headers(resp):
 
 @app.get("/")
 def index():
-    return render_template("index.html", limits={
+    return render_template("index.html", playlist_max=config.PLAYLIST_DL_MAX, limits={
         "max_filesize_mb": config.MAX_FILESIZE_MB,
         "max_duration_sec": config.MAX_DURATION_SEC,
         "file_ttl_minutes": config.FILE_TTL_MINUTES,
@@ -303,13 +303,31 @@ def api_download():
     if thumb and not str(thumb).startswith(("http://", "https://")):
         thumb = None
 
+    # Плейлист целиком архивом. Список роликов сервер получает сам заново —
+    # от клиента берётся только ссылка на плейлист.
+    playlist_n = 0
+    if data.get("playlist"):
+        if images_mode or data.get("format_id") or not dl.is_youtube_list(url):
+            return err("Архивом можно скачать только плейлист или канал YouTube")
+        try:
+            listing = dl.probe_list(url)
+        except Exception:                     # noqa: BLE001
+            return err("Не удалось получить список роликов плейлиста")
+        playlist_n = min(len(listing["entries"]), config.PLAYLIST_DL_MAX)
+        if not playlist_n:
+            return err("В плейлисте нет доступных роликов")
+        clip_task, bundle = None, False     # отрезок к плейлисту не применяется
+        title = str(listing.get("title") or "Плейлист")[:200]
+        thumb = (listing["entries"][0].get("thumbnail") or thumb)
+        label = f"Плейлист · {playlist_n} шт. · {label.split(' · ✂')[0]}"
+
     try:
         task = manager.create(url=url, fmt=fmt, extra=extra, label=label,
                               title=title, thumbnail=thumb, bundle=bundle,
                               is_live=bool(data.get("is_live")),
                               images_mode=images_mode,
                               use_egress=bool(data.get("via_egress")),
-                              clip=clip_task)
+                              clip=clip_task, playlist=playlist_n)
     except dl.Overloaded:
         # честный отказ сразу, а не молчаливое ожидание в очереди
         return err("Сервис сейчас перегружен, попробуйте через пару минут", 503)

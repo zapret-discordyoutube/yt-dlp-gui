@@ -83,6 +83,9 @@ PROXY = os.environ.get("YTG_PROXY", "").strip()
 # скачивание идёт тоже через него. Пусто -> механизм выключен.
 EGRESS_PROXY = os.environ.get("YTG_EGRESS_PROXY", "").strip()
 MAX_FILESIZE_MB = int(os.environ.get("YTG_MAX_FILESIZE_MB", "2048"))   # потолок на один файл
+# Плейлист архивом: не больше стольких роликов за раз (архив целиком — в
+# пределах MAX_FILESIZE_MB). Больше — и разборы подряд грозят антиботом YouTube.
+PLAYLIST_DL_MAX = int(os.environ.get("YTG_PLAYLIST_DL_MAX", "50"))
 MAX_DURATION_SEC = int(os.environ.get("YTG_MAX_DURATION_SEC", str(4 * 3600)))  # 4 часа
 DISK_QUOTA_MB = int(os.environ.get("YTG_DISK_QUOTA_MB", "5120"))       # 5 ГБ на всю папку
 # Сервис живёт на Proxmox-хосте: мало оставить место себе, нужно не съесть
