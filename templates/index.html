@@ -968,6 +968,9 @@ function markLost(id, text) {
 function renderTask(t) {
   const el = document.getElementById("task-" + t.id);
   if (!el) return;
+  // Подпись может дополниться по ходу (плейлист: «скачано N из M»).
+  const lbl = el.querySelector(".task__label");
+  if (lbl && t.label && lbl.textContent !== t.label) { lbl.textContent = t.label; lbl.title = t.label; }
   const bar = el.querySelector(".progress");
   const fill = el.querySelector(".progress__fill");
   const status = el.querySelector(`[data-status="${t.id}"]`);
