@@ -188,3 +188,10 @@ def test_file_served_with_cyrillic_name(client):
         assert "%D0%A0" in cd            # 'Р' в процентном кодировании
     finally:
         disk.unlink(missing_ok=True)
+
+
+def test_playlist_archive_only_for_youtube_lists(client):
+    r = client.post("/api/downloads", json={"url": "https://www.youtube.com/watch?v=x",
+                                            "playlist": True, "kind": "audio"})
+    assert r.status_code == 400
+    assert "плейлист" in r.get_json()["error"]

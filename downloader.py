@@ -804,6 +804,7 @@ class Task:
     images_mode: bool = False    # скачать фото из поста-галереи (без видео)
     use_egress: bool = False     # качать через запасной egress-прокси (бан)
     clip: tuple | None = None    # (start,end) для пост-обрезки ffmpeg (YouTube)
+    playlist: int = 0            # >0 — плейлист архивом: сколько роликов качать
     status: str = "queued"       # queued|preparing|downloading|processing|finished|error|cancelled
     phase: str | None = None     # до первых байт: connect | bypass (для подписи в UI)
     percent: float | None = None
@@ -1000,13 +1001,14 @@ class DownloadManager:
     def create(self, url: str, fmt: str, extra: dict, label: str,
                title: str, thumbnail: str | None, bundle: bool = False,
                is_live: bool = False, images_mode: bool = False,
-               use_egress: bool = False, clip: tuple | None = None) -> Task:
+               use_egress: bool = False, clip: tuple | None = None,
+               playlist: int = 0) -> Task:
         # Идентификатор — единственное, что защищает чужой файл от выдачи,
         # поэтому берём его целиком, а не первые 12 символов.
         task = Task(id=uuid.uuid4().hex, url=url, title=title,
                     fmt=fmt, extra=extra, label=label, thumbnail=thumbnail,
                     bundle=bundle, is_live=is_live, images_mode=images_mode,
-                    use_egress=use_egress, clip=clip)
+                    use_egress=use_egress, clip=clip, playlist=playlist)
         with self.lock:
             if len(self.tasks) >= config.TASKS_MAX:
                 raise Overloaded("too_many_tasks")
@@ -1118,6 +1120,7 @@ class DownloadManager:
             "images_mode": task.images_mode, "bundle": task.bundle,
             "proxy": self._task_proxy(task),
             "clip": list(task.clip) if task.clip else None,
+            "playlist": task.playlist,
             # Готовый разбор из «Проверить»: без повторного разбора ролика.
             "info": (None if task.is_live or task.images_mode
                      else cached_info(task.url, task.use_egress)),
@@ -1260,6 +1263,8 @@ class DownloadManager:
             result = self._execute(task)
             task.metrics.update(result.get("metrics") or {})
             status = result.get("status")
+            if task.playlist and result.get("pl_done") is not None:
+                task.label = f"{task.label} · скачано {result['pl_done']} из {task.playlist}"
             # Отмена могла прийти уже после последнего события. Публиковать
             # такую загрузку нельзя: пользователь нажал «Отмена» и получил
             # подтверждение.

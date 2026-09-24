@@ -160,3 +160,20 @@ def test_racefd_direct_session_binds_source_ip(monkeypatch):
     assert isinstance(ad, racefd._SourceAdapter) and ad._source_ip == "203.0.113.9"
     monkeypatch.setattr(config, "YT_SOURCE_IP", "")
     assert not isinstance(racefd._direct_session().get_adapter("https://x/"), racefd._SourceAdapter)
+
+
+def test_bundle_playlist_names_and_skips_playlist_files(tmp_path, monkeypatch):
+    """Архив плейлиста: «001 - Название.ext» по номеру, файлы уровня
+    плейлиста (номер 0) не берутся и не считаются роликами."""
+    import zipfile
+    import jobrunner
+    tid = "b" * 32
+    for name in (f"{tid}.001.opus", f"{tid}.002.opus", f"{tid}.000.jpg"):
+        (config.DOWNLOAD_DIR / name).write_bytes(b"x")
+    path, n = jobrunner.bundle_playlist(tid, "Плейлист", {1: "Первый: урок", 2: "Второй"})
+    names = zipfile.ZipFile(path).namelist()
+    assert n == 2
+    assert names == ["001 - Первый урок.opus", "002 - Второй.opus"]
+    import os
+    os.unlink(path)
+    (config.DOWNLOAD_DIR / f"{tid}.000.jpg").unlink(missing_ok=True)

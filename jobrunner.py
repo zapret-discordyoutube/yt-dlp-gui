@@ -64,11 +64,15 @@ class Job:
         # Разбор из «Проверить» (сделан сервером тем же путём) — если есть,
         # ролик заново не разбираем.
         self.info: dict | None = spec.get("info") or None
+        # Плейлист архивом: сколько роликов; названия — по номеру в плейлисте.
+        self.playlist: int = int(spec.get("playlist") or 0)
+        self.pl_titles: dict[int, str] = {}
         clip = spec.get("clip")
         self.clip: tuple[float, float | None] | None = (
             (float(clip[0]), None if clip[1] is None else float(clip[1]))
             if clip else None)
         self.cancelled = False
+        self.pl_done = 0
         self.error: str | None = None     # причина, если оборвал сторож
         self._out = out
         self._last_progress = 0.0
@@ -122,6 +126,19 @@ class Job:
                 self.emit(ev="phase", phase=d["ytg_phase"])
                 return
             st = d.get("status")
+            # Плейлист: прогресс — общий по всем роликам, склейка отдельного
+            # ролика «обработкой» всю задачу не объявляет.
+            pl_idx = (d.get("info_dict") or {}).get("playlist_index") if self.playlist else None
+            if pl_idx:
+                self.pl_titles[int(pl_idx)] = (d.get("info_dict") or {}).get("title") or ""
+            if self.playlist and st == "finished":
+                if not started[0]:
+                    started[0] = True
+                    self.status("downloading")
+                if pl_idx:
+                    self.emit(ev="progress", percent=round(min(99.9, pl_idx / self.playlist * 100), 1),
+                              speed=None, eta=None, total=None)
+                return
             if st == "downloading":
                 if not started[0]:
                     started[0] = True
@@ -139,9 +156,12 @@ class Job:
                     eta = int((total - done) / speed)
                 else:
                     eta = d.get("eta")
-                self.emit(ev="progress",
-                          percent=round(done / total * 100, 1) if total else None,
-                          speed=speed, eta=eta, total=total)
+                pct = round(done / total * 100, 1) if total else None
+                if pl_idx and pct is not None:
+                    # Общий прогресс: готовые ролики + доля текущего.
+                    pct = round(min(99.9, ((pl_idx - 1) + pct / 100) / self.playlist * 100), 1)
+                    eta = None
+                self.emit(ev="progress", percent=pct, speed=speed, eta=eta, total=total)
             elif st == "finished":
                 # Маленький файл успевает скачаться до первого замера — тогда
                 # объявляем «скачивание» задним числом, иначе у задачи нет ни
@@ -173,7 +193,10 @@ class Job:
             self.status("processing")
             final = bundle_outputs(self.id, self.title) or final
         if final and os.path.exists(final):
-            return {"status": "finished", "filename": os.path.basename(final)}
+            out = {"status": "finished", "filename": os.path.basename(final)}
+            if self.playlist:
+                out["pl_done"] = self.pl_done
+            return out
         return {"status": "error",
                 "error": self.error or "Файл не найден после скачивания"}
 
@@ -217,13 +240,43 @@ class Job:
         # https-форматов работает racefd. Разрешение при этом не теряется.
         if dl.is_youtube(self.url):
             opts["format_sort"] = list(YT_FORMAT_SORT)
+        if self.playlist:
+            opts.update({
+                "noplaylist": False,
+                "playlistend": self.playlist,
+                # Номер ролика в имени — по нему архив раскладывает файлы.
+                "outtmpl": {"default": f"{self.id}.%(playlist_index)03d.%(ext)s"},
+                # Недоступный ролик (18+, удалён) пропускаем, а не валим всё.
+                "ignoreerrors": True,
+                # Обложку/описание самого плейлиста не пишем — только ролики.
+                "allow_playlist_files": False,
+                # Пауза между роликами: разборы подряд YouTube принимает за бота.
+                "sleep_interval": 1, "max_sleep_interval": 3,
+                # Длиннее лимита — пропустить (условия списком = «или»).
+                "match_filter": yt_dlp.utils.match_filter_func(
+                    [f"duration < {config.MAX_DURATION_SEC}", "!duration"]),
+            })
         # Отрезок вне YouTube — частичная загрузка только нужного куска.
         if self.clip and not dl.is_youtube(self.url):
             opts.update(dl.clip_range_opts(*self.clip))
         opts.update(self.extra)
         return opts
 
+    def download_playlist(self) -> str | None:
+        """Плейлист: ролики по очереди (недоступные пропускаются), затем архив."""
+        with yt_dlp.YoutubeDL(self.ydl_opts()) as ydl:
+            ydl.extract_info(self.url, download=True)
+        if self.cancelled:
+            raise yt_dlp.utils.DownloadCancelled()
+        self.status("processing")
+        path, self.pl_done = bundle_playlist(self.id, self.title, self.pl_titles)
+        if not path:
+            self.error = self.error or "Ни один ролик плейлиста не скачался"
+        return path
+
     def download_media(self) -> str | None:
+        if self.playlist:
+            return self.download_playlist()
         with yt_dlp.YoutubeDL(self.ydl_opts()) as ydl:
             info = None
             if self.info:
@@ -335,6 +388,44 @@ def trim_file(path: str, clip: tuple) -> str | None:
     except OSError:
         return out
     return path
+
+
+def bundle_playlist(tid: str, title: str, titles: dict[int, str]) -> tuple[str | None, int]:
+    """Архив плейлиста: «001 - Название.mp4» по номеру в плейлисте.
+    Возвращает (путь к ZIP, сколько роликов в нём)."""
+    import re
+    files = dl.task_files(tid)
+    if not files:
+        return None, 0
+    zpath = config.DOWNLOAD_DIR / f"{tid}.zip"
+    used: set[str] = set()
+    indices: set[int] = set()
+    with zipfile.ZipFile(zpath, "w", zipfile.ZIP_STORED) as z:
+        for p in files:
+            m = re.match(rf"{tid}\.(\d+)\.(.+)$", p.name)
+            if m:
+                idx = int(m.group(1))
+                if idx == 0:                   # файл уровня плейлиста — не ролик
+                    continue
+                indices.add(idx)
+                ext = "." + m.group(2).rsplit(".", 1)[-1]
+                name = dl.pretty_filename(titles.get(idx) or f"ролик {idx}", "")
+                arc = f"{idx:03d} - {name}{ext}"
+            else:
+                arc = dl.pretty_filename(title, p.suffix)
+            stem, ext_ = os.path.splitext(arc)
+            n = 1
+            while arc in used:
+                n += 1
+                arc = f"{stem} ({n}){ext_}"
+            used.add(arc)
+            z.write(p, arcname=arc)
+    for p in files:
+        try:
+            p.unlink()
+        except OSError:
+            pass
+    return str(zpath), len(indices)
 
 
 def bundle_outputs(tid: str, title: str) -> str | None:
