@@ -626,8 +626,28 @@ def _cache_key(url: str) -> str:
         return url
 
 
+# Итог выбора формата при разборе (по умолчанию 'bv*+ba'): yt-dlp кладёт
+# поля выбранного формата и requested_formats прямо в корень разбора. Если
+# их оставить, загрузка аудио наследовала requested_formats=[видео, звук] и
+# склеивала звук с несуществующим файлом видео (FileNotFoundError .f401).
+_INFO_SELECTION = frozenset((
+    "requested_formats", "requested_downloads", "requested_subtitles",
+    "format", "format_id", "stretched_ratio",
+))
+
+
+def _unselected(info: dict) -> dict:
+    """Разбор без результата выбора формата — как его отдаёт экстрактор.
+    Полей форматов у самого ролика экстракторы не задают (проверено на
+    YouTube и SoundCloud): в корне они только от выбора."""
+    fmt_keys = set().union(*(f.keys() for f in info.get("formats") or []
+                             if isinstance(f, dict)))
+    return {k: v for k, v in info.items()
+            if k not in _INFO_DROP and k not in _INFO_SELECTION and k not in fmt_keys}
+
+
 def cache_info(urls, via_egress: bool, info: dict) -> None:
-    slim = {k: v for k, v in info.items() if k not in _INFO_DROP}
+    slim = _unselected(info)
     now = time.time()
     with _info_lock:
         for u in {_cache_key(u) for u in urls if u}:

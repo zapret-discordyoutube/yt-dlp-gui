@@ -155,6 +155,31 @@ def test_info_cache_reuse_rules(monkeypatch):
     assert dl.cached_info("https://www.youtube.com/watch?v=v", True) is None
 
 
+def test_info_cache_drops_format_selection(monkeypatch):
+    """Разбор кэшируется без выбранного по умолчанию формата: иначе загрузка
+    аудио наследовала requested_formats=[видео, звук] и падала на склейке
+    с нескачанным видео (FileNotFoundError .f401.mkv)."""
+    import yt_dlp
+    monkeypatch.setattr(dl, "_info_cache", dl.OrderedDict())
+    video = {"format_id": "401", "url": "https://x/v", "ext": "mp4", "protocol": "https",
+             "vcodec": "av01", "acodec": "none", "height": 2160, "width": 3840}
+    audio = {"format_id": "251", "url": "https://x/a", "ext": "webm", "protocol": "https",
+             "vcodec": "none", "acodec": "opus", "abr": 130}
+    info = {"id": "v", "title": "T", "extractor": "youtube", "extractor_key": "Youtube",
+            "webpage_url": "https://www.youtube.com/watch?v=v",
+            "formats": [audio, video], "requested_formats": [video, audio],
+            "format_id": "401+251", "format": "401+251", "ext": "webm",
+            "height": 2160, "vcodec": "av01", "acodec": "opus"}
+    dl.cache_info(("https://www.youtube.com/watch?v=v",), False, info)
+    got = dl.cached_info("https://www.youtube.com/watch?v=v", False)
+    assert got["title"] == "T" and len(got["formats"]) == 2
+    for k in ("requested_formats", "format_id", "format", "height", "vcodec", "ext"):
+        assert k not in got, k
+    with yt_dlp.YoutubeDL({"format": "bestaudio", "simulate": True, "quiet": True}) as ydl:
+        res = ydl.process_ie_result(dict(got), download=True)
+    assert res["format_id"] == "251" and not res.get("requested_formats")
+
+
 def test_info_cache_is_bounded(monkeypatch):
     monkeypatch.setattr(dl, "_info_cache", dl.OrderedDict())
     monkeypatch.setattr(dl, "INFO_CACHE_MAX", 3)
