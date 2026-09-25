@@ -655,10 +655,11 @@ function renderPreview(d) {
   const noAudio = d.has_audio === false;
   const audioBtn = $('#mode-seg button[data-mode="audio"]');
   audioBtn.disabled = noAudio;
-  audioBtn.title = noAudio ? "В этом ролике нет звука" : "";
+  audioBtn.title = noAudio ? (multi ? "В роликах этого поста нет звука" : "В этом ролике нет звука") : "";
   $("#sel-vaudio").disabled = noAudio;
   $("#vaudio-hint").textContent = noAudio
-    ? "В этом ролике нет звука — скачается только видео."
+    ? (multi ? "В роликах этого поста нет звука — скачаются только видео."
+             : "В этом ролике нет звука — скачается только видео.")
     : "Источник отдаёт звук в AAC или Opus. MP3 — во вкладке «Аудио».";
   // Сохранённый выбор «Аудио» не затираем — для следующих роликов он в силе.
   let mode = settings.mode;
