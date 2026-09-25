@@ -685,6 +685,30 @@ def cached_info(url: str, via_egress: bool) -> dict | None:
     return info
 
 
+# Посты с несколькими видео, найденные разбором: ссылка -> (когда, сколько).
+# Сервер берёт число отсюда, а не от клиента (живёт как кэш разбора).
+_multi_posts: "OrderedDict[str, tuple[float, int]]" = OrderedDict()
+
+
+def remember_multi(url: str, page: str | None, n: int) -> None:
+    now = time.time()
+    with _info_lock:
+        for u in {_cache_key(u) for u in (url, page) if u}:
+            _multi_posts[u] = (now, n)
+            _multi_posts.move_to_end(u)
+        while len(_multi_posts) > INFO_CACHE_MAX:
+            _multi_posts.popitem(last=False)
+
+
+def multi_count(url: str) -> int:
+    """Сколько видео в посте по свежему разбору (0 — не пост или не знаем)."""
+    with _info_lock:
+        hit = _multi_posts.get(_cache_key(url))
+    if not hit or time.time() - hit[0] > INFO_CACHE_SEC:
+        return 0
+    return hit[1]
+
+
 def probe(url: str) -> dict:
     if is_youtube_list(url):
         return probe_list(url)
@@ -725,9 +749,19 @@ def probe(url: str) -> dict:
     if duration and not is_live and duration > config.MAX_DURATION_SEC:
         raise ValueError("too_long")
 
+    # Пост с несколькими видео (твит, карусель Instagram, пост boosty): у
+    # разбора нет своих форматов, они у записей. Раньше это выглядело как
+    # обычный ролик, а загрузка падала «Файл не найден после скачивания» —
+    # записи писались в один файл. Теперь качаем все записи архивом.
+    video_entries = [e for e in info.get("entries") or []
+                     if isinstance(e, dict) and e.get("formats")]
+    multi = bool(video_entries) and not info.get("formats")
+    all_formats = ([f for e in video_entries for f in e["formats"]] if multi
+                   else info.get("formats") or [])
+
     # доступные высоты видео -> для простого селектора качества
     heights = set()
-    for f in info.get("formats") or []:
+    for f in all_formats:
         h = f.get("height")
         # None = кодек неизвестен, но видео у формата есть; отбрасываем
         # только явное "none" (см. пояснение ниже про два разных значения).
@@ -777,6 +811,10 @@ def probe(url: str) -> dict:
     images = collect_images(info)
     is_video_page = bool(info.get("duration")) or is_youtube(url)
     is_gallery = bool(images) and not formats and not is_video_page
+    # Смешанная карусель (фото и видео) по-прежнему идёт галереей фото.
+    multi_count = len(video_entries) if multi and not is_gallery else 0
+    if multi_count:
+        remember_multi(url, info.get("webpage_url"), multi_count)
     if not formats and is_video_page:
         if (info.get("age_limit") or 0) >= 18:
             raise ValueError("age_restricted")
@@ -820,7 +858,9 @@ def probe(url: str) -> dict:
         # Звука нет ни в одном формате (acodec точно "none", не неизвестен):
         # немые ролики Instagram/Pinterest. Вкладку «Аудио» не предлагаем —
         # извлечение звука падало на ffprobe.
-        "has_audio": any(f.get("acodec") != "none" for f in info.get("formats") or []),
+        "has_audio": any(f.get("acodec") != "none" for f in all_formats),
+        # Видео в посте несколько — скачаются все, архивом.
+        "multi_count": multi_count,
     }
 
 

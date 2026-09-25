@@ -271,7 +271,9 @@ class Job:
                 # Обложку/описание самого плейлиста не пишем — только ролики.
                 "allow_playlist_files": False,
                 # Пауза между роликами: разборы подряд YouTube принимает за бота.
-                "sleep_interval": 1, "max_sleep_interval": 3,
+                # Посту с несколькими видео (Twitter, Instagram) она не нужна.
+                **({"sleep_interval": 1, "max_sleep_interval": 3}
+                   if dl.is_youtube(self.url) else {}),
                 # Длиннее лимита — пропустить (условия списком = «или»).
                 "match_filter": yt_dlp.utils.match_filter_func(
                     [f"duration < {config.MAX_DURATION_SEC}", "!duration"]),

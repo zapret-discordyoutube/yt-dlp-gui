@@ -195,3 +195,34 @@ def test_playlist_archive_only_for_youtube_lists(client):
                                             "playlist": True, "kind": "audio"})
     assert r.status_code == 400
     assert "плейлист" in r.get_json()["error"]
+
+
+def test_multi_video_post_downloads_all_entries(client, monkeypatch):
+    """Пост с несколькими видео — все записи архивом; число видео сервер
+    берёт из своего разбора, а не от клиента."""
+    import app as app_module
+    seen = {}
+
+    class _T:
+        def public(self):
+            return {"id": "t"}
+
+    def fake_create(**kw):
+        seen.update(kw)
+        return _T()
+    monkeypatch.setattr(app_module.manager, "create", fake_create)
+    monkeypatch.setattr(app_module.dl, "multi_count", lambda url: 3)
+    r = client.post("/api/downloads", json={"url": "https://x.com/u/status/1",
+                                            "multi": True, "kind": "video",
+                                            "clip_from": "5", "clip_to": "9"})
+    assert r.status_code == 201
+    assert seen["playlist"] == 3 and seen["clip"] is None
+    assert seen["label"].startswith("3 видео")
+
+    # Сервер поста не знает — клиентский флаг ничего не меняет.
+    monkeypatch.setattr(app_module.dl, "multi_count", lambda url: 0)
+    monkeypatch.setattr(app_module.dl, "probe", lambda url: {"multi_count": 0})
+    seen.clear()
+    r = client.post("/api/downloads", json={"url": "https://x.com/u/status/2",
+                                            "multi": True, "kind": "video"})
+    assert r.status_code == 201 and seen["playlist"] == 0

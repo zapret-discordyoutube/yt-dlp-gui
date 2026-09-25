@@ -306,6 +306,19 @@ def api_download():
     # Плейлист целиком архивом. Список роликов сервер получает сам заново —
     # от клиента берётся только ссылка на плейлист.
     playlist_n = 0
+    # Пост с несколькими видео — все записи архивом (тем же путём, что
+    # плейлист). Число видео — из разбора сервера, не от клиента.
+    if data.get("multi") and not images_mode and not data.get("playlist"):
+        n = dl.multi_count(url)
+        if not n:
+            try:
+                n = dl.probe(url).get("multi_count") or 0
+            except Exception:                 # noqa: BLE001
+                n = 0
+        if n:
+            playlist_n = min(n, config.PLAYLIST_DL_MAX)
+            clip_task, bundle = None, False
+            label = f"{playlist_n} видео · {label.split(' · ✂')[0]}"
     if data.get("playlist"):
         if images_mode or data.get("format_id") or not dl.is_youtube_list(url):
             return err("Архивом можно скачать только плейлист или канал YouTube")

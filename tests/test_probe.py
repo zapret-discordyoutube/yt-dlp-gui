@@ -244,3 +244,19 @@ def test_probe_reports_silent_video(monkeypatch, formats, expected):
 def test_silent_audio_error_is_explained():
     raw = ("ERROR: Postprocessing: WARNING: unable to obtain file audio codec with ffprobe")
     assert "нет звука" in dl._clean_err(raw)
+
+
+def test_probe_multi_video_post(monkeypatch):
+    """Твит/карусель с несколькими видео: форматы у записей, а не у поста.
+    Высоты и звук берём из записей, число видео запоминаем для сервера."""
+    monkeypatch.setattr(dl, "_info_cache", dl.OrderedDict())
+    monkeypatch.setattr(dl, "_multi_posts", dl.OrderedDict())
+    entry = lambda i: {"id": str(i), "formats": [
+        {"format_id": "v", "vcodec": "avc1", "acodec": "mp4a", "height": 720, "ext": "mp4"}]}
+    monkeypatch.setattr(dl, "_probe_extract", lambda url, proxy: {
+        "_type": "playlist", "id": "p", "title": "t", "entries": [entry(1), entry(2)],
+        "webpage_url": "https://x.com/u/status/1"})
+    out = dl.probe("https://x.com/u/status/1")
+    assert out["multi_count"] == 2 and out["heights"] == ["720"] and out["has_audio"]
+    assert not out["is_gallery"]
+    assert dl.multi_count("https://x.com/u/status/1") == 2

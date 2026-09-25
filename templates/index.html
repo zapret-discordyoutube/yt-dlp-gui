@@ -167,6 +167,10 @@
             <span class="live-badge live-badge--img">Фото</span>
             Пост с изображениями (<span id="pv-gallery-count"></span>). Скачаются одним архивом.
           </div>
+          <div class="live-note hidden" id="pv-multi">
+            <span class="live-badge live-badge--img">Видео</span>
+            В посте <span id="pv-multi-count"></span>. Скачаются все, одним архивом.
+          </div>
         </div>
       </div>
 
@@ -637,6 +641,14 @@ function renderPreview(d) {
     $("#" + id).classList.toggle("hidden", gallery));
   // У фото нет ни отрезка, ни звуковых дорожек.
   if (gallery) ["clip-row", "alang-row"].forEach(id => $("#" + id).classList.add("hidden"));
+  // Пост с несколькими видео: качаются все записи архивом. Отдельных
+  // форматов у поста нет — вкладка «Все форматы» ему не подходит.
+  const multi = d.multi_count || 0;
+  $("#pv-multi").classList.toggle("hidden", !multi);
+  if (multi) $("#pv-multi-count").textContent = multi + " видео";
+  const allBtn = $('#mode-seg button[data-mode="all"]');
+  allBtn.disabled = !!multi;
+  allBtn.title = multi ? "У поста с несколькими видео нет общего списка форматов" : "";
   // Немой ролик (Instagram/Pinterest): звука нет ни в одном формате.
   const noAudio = d.has_audio === false;
   const audioBtn = $('#mode-seg button[data-mode="audio"]');
@@ -647,10 +659,13 @@ function renderPreview(d) {
     ? "В этом ролике нет звука — скачается только видео."
     : "Источник отдаёт звук в AAC или Opus. MP3 — во вкладке «Аудио».";
   // Сохранённый выбор «Аудио» не затираем — для следующих роликов он в силе.
-  if (!gallery) setMode(noAudio && settings.mode === "audio" ? "video" : settings.mode, !noAudio);
+  let mode = settings.mode;
+  if ((noAudio && mode === "audio") || (multi && mode === "all")) mode = "video";
+  // Вынужденную смену не сохраняем — выбор в силе для следующих роликов.
+  if (!gallery) setMode(mode, mode === settings.mode);
   else { updateExtraRow(); updateSizeEst(); }
   $("#download-label").textContent =
-    gallery ? "Скачать фото" : (d.is_live ? "Записать эфир" : "Скачать");
+    gallery ? "Скачать фото" : (d.is_live ? "Записать эфир" : (multi ? `Скачать все (${multi})` : "Скачать"));
 
   $("#intro").classList.add("hidden");
   $("#preview").classList.remove("hidden");
@@ -823,6 +838,7 @@ $("#download-btn").addEventListener("click", async () => {
   const body = { url: current.webpage_url, title: current.title, thumbnail: current.thumbnail };
   if (current.is_live) body.is_live = true;
   if (current.via_egress) body.via_egress = true;
+  if (current.multi_count) body.multi = true;
   if (current.is_gallery) {
     // Галерея: качаем фото архивом, выбор формата и постобработка неприменимы.
     body.kind = "image";
