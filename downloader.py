@@ -846,7 +846,8 @@ def probe(url: str) -> dict:
         "title": info.get("title") or "Без названия",
         "uploader": info.get("uploader") or info.get("channel") or "",
         "duration": duration,
-        "thumbnail": info.get("thumbnail") or (images[0] if images else None),
+        "thumbnail": (info.get("thumbnail") or (images[0] if images else None)
+                      or next((e.get("thumbnail") for e in video_entries if e.get("thumbnail")), None)),
         "webpage_url": info.get("webpage_url") or url,
         "extractor": info.get("extractor_key") or info.get("extractor"),
         "heights": avail,

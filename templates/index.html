@@ -786,9 +786,10 @@ function setMode(mode, persist = true) {
   $("#opts-video").classList.toggle("hidden", mode !== "video");
   $("#opts-audio").classList.toggle("hidden", mode !== "audio");
   $("#opts-all").classList.toggle("hidden", mode !== "all");
-  // Отрезок — для видео/аудио (не для «Все форматы», галерей и эфиров).
+  // Отрезок — для видео/аудио (не для «Все форматы», галерей, эфиров и постов из нескольких видео).
   $("#clip-row").classList.toggle("hidden",
-    !!(current && (current.is_gallery || current.is_live)) || !(mode === "video" || mode === "audio"));
+    !!(current && (current.is_gallery || current.is_live || current.multi_count))
+    || !(mode === "video" || mode === "audio"));
   updateAlangRow();
   updateSizeEst();
 }
