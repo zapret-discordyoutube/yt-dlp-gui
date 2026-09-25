@@ -645,7 +645,9 @@ function renderPreview(d) {
   // форматов у поста нет — вкладка «Все форматы» ему не подходит.
   const multi = d.multi_count || 0;
   $("#pv-multi").classList.toggle("hidden", !multi);
-  if (multi) $("#pv-multi-count").textContent = multi + " видео";
+  const multiImg = d.multi_images || 0;       // смешанная карусель: ещё и фото
+  if (multi) $("#pv-multi-count").textContent =
+    multi + " видео" + (multiImg ? " и " + multiImg + " фото" : "");
   const allBtn = $('#mode-seg button[data-mode="all"]');
   allBtn.disabled = !!multi;
   allBtn.title = multi ? "У поста с несколькими видео нет общего списка форматов" : "";
@@ -665,7 +667,7 @@ function renderPreview(d) {
   if (!gallery) setMode(mode, mode === settings.mode);
   else { updateExtraRow(); updateSizeEst(); }
   $("#download-label").textContent =
-    gallery ? "Скачать фото" : (d.is_live ? "Записать эфир" : (multi ? `Скачать все (${multi})` : "Скачать"));
+    gallery ? "Скачать фото" : (d.is_live ? "Записать эфир" : (multi ? `Скачать все (${multi + multiImg})` : "Скачать"));
 
   $("#intro").classList.add("hidden");
   $("#preview").classList.remove("hidden");

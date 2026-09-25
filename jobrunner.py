@@ -59,6 +59,8 @@ class Job:
         self.extra: dict = dict(spec.get("extra") or {})
         # «Не объединять» при каскадном выборе — см. split_tracks.
         self.split: bool = bool(self.extra.pop(dl.SPLIT_KEY, False))
+        # Смешанная карусель: к роликам — фото поста (см. download_playlist).
+        self.post_images: bool = bool(self.extra.pop(dl.POST_IMAGES_KEY, False))
         self.is_live: bool = bool(spec.get("is_live"))
         self.images_mode: bool = bool(spec.get("images_mode"))
         self.bundle: bool = bool(spec.get("bundle"))
@@ -285,11 +287,20 @@ class Job:
         return opts
 
     def download_playlist(self) -> str | None:
-        """Плейлист: ролики по очереди (недоступные пропускаются), затем архив."""
+        """Плейлист: ролики по очереди (недоступные пропускаются), затем архив.
+        Смешанная карусель: записи-фото yt-dlp пропускает (форматов нет) —
+        их качаем следом, под их номерами в карусели."""
         with yt_dlp.YoutubeDL(self.ydl_opts()) as ydl:
             ydl.extract_info(self.url, download=True)
         if self.cancelled:
             raise yt_dlp.utils.DownloadCancelled()
+        if self.post_images:
+            pairs = [(i, u) for i, u in dl.collect_images_indexed(self.image_info())
+                     if i <= self.playlist]
+            base = sum(p.stat().st_size for p in dl.task_files(self.id))
+            for i, _ in pairs:
+                self.pl_titles.setdefault(i, self.title)
+            self.save_images([(u, f"{i:03d}") for i, u in pairs], base)
         self.status("processing")
         path, self.pl_done = bundle_playlist(self.id, self.title, self.pl_titles)
         if not path:
@@ -346,9 +357,9 @@ class Job:
                 return os.path.splitext(final)[0] + f".{ext}"
         return final
 
-    def download_images(self) -> str | None:
-        """Картинки поста-галереи (Instagram/Twitter). Адреса берём заново
-        из yt-dlp, а не от клиента."""
+    def image_info(self) -> dict:
+        """Разбор поста ради картинок. Адреса берём заново из yt-dlp, а не
+        от клиента."""
         opts = {
             "quiet": True, "no_warnings": True, "skip_download": True,
             "ignore_no_formats_error": True, "socket_timeout": 30,
@@ -356,16 +367,31 @@ class Job:
             **({"proxy": self.proxy} if self.proxy else {}),
         }
         with yt_dlp.YoutubeDL(opts) as ydl:
-            info = ydl.sanitize_info(ydl.extract_info(self.url, download=False))
-        urls = dl.collect_images(info)
+            return ydl.sanitize_info(ydl.extract_info(self.url, download=False))
+
+    def download_images(self) -> str | None:
+        """Картинки поста-галереи (Instagram/Twitter)."""
+        urls = dl.collect_images(self.image_info())
         if not urls:
             self.error = "В посте не найдено изображений"
             return None
         self.status("downloading")
+        # Номер с ведущим нулём — файлы идут в порядке карусели.
+        saved = self.save_images([(u, f"{i:02d}") for i, u in enumerate(urls, 1)])
+        if saved == 0:
+            self.error = self.error or "Не удалось скачать изображения"
+            return None
+        self.bundle = saved > 1
+        files = dl.task_files(self.id)
+        return str(files[0]) if files else None
+
+    def save_images(self, items: list[tuple[str, str]], total: int = 0) -> int:
+        """Скачать картинки как <id>.<метка>.<ext>. total — уже занятый
+        задачей объём (общий предел размера). Возвращает, сколько сохранено."""
         from curl_cffi import requests as cffi
         proxies = {"http": self.proxy, "https": self.proxy} if self.proxy else None
-        total = saved = 0
-        for i, u in enumerate(urls, 1):
+        saved = 0
+        for n, (u, tag) in enumerate(items, 1):
             if self.cancelled:
                 raise yt_dlp.utils.DownloadCancelled()
             try:
@@ -380,21 +406,16 @@ class Job:
                 self.error = "Файлы превышают допустимый размер"
                 raise yt_dlp.utils.DownloadCancelled()
             ext = dl._img_ext(r.headers.get("content-type"), u)
-            # Номер с ведущим нулём — файлы идут в порядке карусели.
-            p = config.DOWNLOAD_DIR / f"{self.id}.{i:02d}.{ext}"
+            p = config.DOWNLOAD_DIR / f"{self.id}.{tag}.{ext}"
             try:
                 p.write_bytes(data)
                 saved += 1
             except OSError:
                 pass
-            self.emit(ev="progress", percent=round(i / len(urls) * 100, 1),
-                      speed=None, eta=None, total=total)
-        if saved == 0:
-            self.error = self.error or "Не удалось скачать изображения"
-            return None
-        self.bundle = saved > 1
-        files = dl.task_files(self.id)
-        return str(files[0]) if files else None
+            if not self.playlist:
+                self.emit(ev="progress", percent=round(n / len(items) * 100, 1),
+                          speed=None, eta=None, total=total)
+        return saved
 
 
 def trim_file(path: str, clip: tuple) -> str | None:

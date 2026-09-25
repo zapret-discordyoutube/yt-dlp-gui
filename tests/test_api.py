@@ -211,7 +211,8 @@ def test_multi_video_post_downloads_all_entries(client, monkeypatch):
         seen.update(kw)
         return _T()
     monkeypatch.setattr(app_module.manager, "create", fake_create)
-    monkeypatch.setattr(app_module.dl, "multi_count", lambda url: 3)
+    monkeypatch.setattr(app_module.dl, "multi_post",
+                        lambda url: {"videos": 3, "images": 0, "entries": 3})
     r = client.post("/api/downloads", json={"url": "https://x.com/u/status/1",
                                             "multi": True, "kind": "video",
                                             "clip_from": "5", "clip_to": "9"})
@@ -220,9 +221,28 @@ def test_multi_video_post_downloads_all_entries(client, monkeypatch):
     assert seen["label"].startswith("3 видео")
 
     # Сервер поста не знает — клиентский флаг ничего не меняет.
-    monkeypatch.setattr(app_module.dl, "multi_count", lambda url: 0)
+    monkeypatch.setattr(app_module.dl, "multi_post", lambda url: None)
     monkeypatch.setattr(app_module.dl, "probe", lambda url: {"multi_count": 0})
     seen.clear()
     r = client.post("/api/downloads", json={"url": "https://x.com/u/status/2",
                                             "multi": True, "kind": "video"})
     assert r.status_code == 201 and seen["playlist"] == 0
+
+
+def test_mixed_carousel_asks_runner_for_photos_too(client, monkeypatch):
+    """Смешанная карусель: предел — по всем записям (номера сквозные для фото
+    и видео), исполнителю — флаг «добавить фото»."""
+    import app as app_module
+    seen = {}
+
+    class _T:
+        def public(self):
+            return {"id": "t"}
+    monkeypatch.setattr(app_module.manager, "create", lambda **kw: (seen.update(kw), _T())[1])
+    monkeypatch.setattr(app_module.dl, "multi_post",
+                        lambda url: {"videos": 1, "images": 2, "entries": 3})
+    r = client.post("/api/downloads", json={"url": "https://www.instagram.com/p/x/",
+                                            "multi": True, "kind": "video"})
+    assert r.status_code == 201
+    assert seen["playlist"] == 3 and seen["extra"].get(app_module.dl.POST_IMAGES_KEY)
+    assert seen["label"].startswith("1 видео + 2 фото")

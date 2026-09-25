@@ -309,16 +309,23 @@ def api_download():
     # Пост с несколькими видео — все записи архивом (тем же путём, что
     # плейлист). Число видео — из разбора сервера, не от клиента.
     if data.get("multi") and not images_mode and not data.get("playlist"):
-        n = dl.multi_count(url)
-        if not n:
+        post = dl.multi_post(url)
+        if not post:
             try:
-                n = dl.probe(url).get("multi_count") or 0
+                dl.probe(url)
             except Exception:                 # noqa: BLE001
-                n = 0
-        if n:
-            playlist_n = min(n, config.PLAYLIST_DL_MAX)
+                pass
+            post = dl.multi_post(url)
+        if post:
+            # Номера записей в карусели — сквозные для фото и видео, поэтому
+            # предел — по всем записям, иначе видео в конце карусели не вошли бы.
+            playlist_n = min(post["entries"] or post["videos"], config.PLAYLIST_DL_MAX)
             clip_task, bundle = None, False
-            label = f"{playlist_n} видео · {label.split(' · ✂')[0]}"
+            what = f"{post['videos']} видео"
+            if post["images"]:
+                extra = {**extra, dl.POST_IMAGES_KEY: True}
+                what += f" + {post['images']} фото"
+            label = f"{what} · {label.split(' · ✂')[0]}"
     if data.get("playlist"):
         if images_mode or data.get("format_id") or not dl.is_youtube_list(url):
             return err("Архивом можно скачать только плейлист или канал YouTube")

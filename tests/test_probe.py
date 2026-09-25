@@ -259,4 +259,22 @@ def test_probe_multi_video_post(monkeypatch):
     out = dl.probe("https://x.com/u/status/1")
     assert out["multi_count"] == 2 and out["heights"] == ["720"] and out["has_audio"]
     assert not out["is_gallery"]
-    assert dl.multi_count("https://x.com/u/status/1") == 2
+    assert dl.multi_post("https://x.com/u/status/1") == {"videos": 2, "images": 0, "entries": 2}
+
+
+def test_probe_mixed_carousel_is_not_a_gallery(monkeypatch):
+    """Карусель из фото и видео: раньше — галерея (видео терялись), теперь —
+    пост: видео и фото, номера фото — их места в карусели."""
+    monkeypatch.setattr(dl, "_info_cache", dl.OrderedDict())
+    monkeypatch.setattr(dl, "_multi_posts", dl.OrderedDict())
+    photo = lambda i: {"id": f"p{i}", "thumbnails": [{"url": f"https://cdn/p{i}.jpg"}]}
+    video = {"id": "v", "thumbnail": "https://cdn/v.jpg", "formats": [
+        {"format_id": "v", "vcodec": "avc1", "acodec": "mp4a", "height": 1080, "ext": "mp4"}]}
+    info = {"_type": "playlist", "id": "c", "title": "t",
+            "entries": [photo(1), video, photo(3)],
+            "webpage_url": "https://www.instagram.com/p/c/"}
+    monkeypatch.setattr(dl, "_probe_extract", lambda url, proxy: info)
+    out = dl.probe("https://www.instagram.com/p/c/")
+    assert not out["is_gallery"] and out["multi_count"] == 1 and out["multi_images"] == 2
+    assert dl.multi_post("https://www.instagram.com/p/c/") == {"videos": 1, "images": 2, "entries": 3}
+    assert dl.collect_images_indexed(info) == [(1, "https://cdn/p1.jpg"), (3, "https://cdn/p3.jpg")]

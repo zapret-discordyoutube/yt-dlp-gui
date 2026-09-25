@@ -282,6 +282,8 @@ _PP_ORDER = ("FFmpegExtractAudio", "FFmpegVideoRemuxer", "SponsorBlock", "Modify
 
 # Флаг в extra: «выбрать по каскаду, скачать дорожки раздельно» (jobrunner).
 SPLIT_KEY = "ytg_split"
+# Флаг в extra: смешанная карусель — к роликам добавить фото поста (jobrunner).
+POST_IMAGES_KEY = "ytg_post_images"
 
 
 def apply_features(fmt: str, extra: dict, features: dict,
@@ -492,23 +494,29 @@ def _best_image(entry: dict) -> str | None:
     return u if u and str(u).startswith(("http://", "https://")) else None
 
 
-def collect_images(info: dict) -> list[str]:
-    """URL картинок из поста без видео (галереи Instagram/Twitter).
+def collect_images_indexed(info: dict) -> list[tuple[int, str]]:
+    """Картинки поста с их местом в карусели (с 1): [(номер, URL)].
 
     Берём только записи без видеоформатов, чтобы не хватать превью настоящих
-    роликов. Возвращаем уникальные адреса в исходном порядке.
+    роликов. Номер — позиция записи, как playlist_index у видео той же
+    карусели: по нему архив смешанного поста идёт в исходном порядке.
     """
     entries = info.get("entries")
     src = entries if entries is not None else [info]
-    urls, seen = [], set()
-    for e in src or []:
+    out, seen = [], set()
+    for i, e in enumerate(src or [], 1):
         if not isinstance(e, dict) or (e.get("formats") or []):
             continue
         u = _best_image(e)
         if u and u not in seen:
             seen.add(u)
-            urls.append(u)
-    return urls
+            out.append((i, u))
+    return out
+
+
+def collect_images(info: dict) -> list[str]:
+    """URL картинок из поста без видео (галереи Instagram/Twitter)."""
+    return [u for _, u in collect_images_indexed(info)]
 
 
 def _img_ext(content_type: str | None, url: str) -> str:
@@ -685,27 +693,29 @@ def cached_info(url: str, via_egress: bool) -> dict | None:
     return info
 
 
-# Посты с несколькими видео, найденные разбором: ссылка -> (когда, сколько).
-# Сервер берёт число отсюда, а не от клиента (живёт как кэш разбора).
-_multi_posts: "OrderedDict[str, tuple[float, int]]" = OrderedDict()
+# Посты с несколькими видео (и, может быть, фото), найденные разбором:
+# ссылка -> (когда, {"videos", "images", "entries"}). Сервер берёт числа
+# отсюда, а не от клиента (живёт как кэш разбора).
+_multi_posts: "OrderedDict[str, tuple[float, dict]]" = OrderedDict()
 
 
-def remember_multi(url: str, page: str | None, n: int) -> None:
+def remember_multi(url: str, page: str | None, post: dict) -> None:
     now = time.time()
     with _info_lock:
         for u in {_cache_key(u) for u in (url, page) if u}:
-            _multi_posts[u] = (now, n)
+            _multi_posts[u] = (now, post)
             _multi_posts.move_to_end(u)
         while len(_multi_posts) > INFO_CACHE_MAX:
             _multi_posts.popitem(last=False)
 
 
-def multi_count(url: str) -> int:
-    """Сколько видео в посте по свежему разбору (0 — не пост или не знаем)."""
+def multi_post(url: str) -> dict | None:
+    """Состав поста по свежему разбору: {"videos", "images", "entries"}
+    (None — не пост с несколькими видео или разбор устарел)."""
     with _info_lock:
         hit = _multi_posts.get(_cache_key(url))
     if not hit or time.time() - hit[0] > INFO_CACHE_SEC:
-        return 0
+        return None
     return hit[1]
 
 
@@ -810,11 +820,13 @@ def probe(url: str) -> dict:
     # раньше такой ролик предлагалось «скачать фото» — его обложку.
     images = collect_images(info)
     is_video_page = bool(info.get("duration")) or is_youtube(url)
-    is_gallery = bool(images) and not formats and not is_video_page
-    # Смешанная карусель (фото и видео) по-прежнему идёт галереей фото.
-    multi_count = len(video_entries) if multi and not is_gallery else 0
+    # Смешанная карусель (фото и видео) — не галерея: качаем и то и другое.
+    is_gallery = bool(images) and not formats and not is_video_page and not multi
+    multi_count = len(video_entries) if multi else 0
     if multi_count:
-        remember_multi(url, info.get("webpage_url"), multi_count)
+        remember_multi(url, info.get("webpage_url"), {
+            "videos": multi_count, "images": len(images),
+            "entries": len(info.get("entries") or [])})
     if not formats and is_video_page:
         if (info.get("age_limit") or 0) >= 18:
             raise ValueError("age_restricted")
@@ -862,6 +874,8 @@ def probe(url: str) -> dict:
         "has_audio": any(f.get("acodec") != "none" for f in all_formats),
         # Видео в посте несколько — скачаются все, архивом.
         "multi_count": multi_count,
+        # ...и фото в той же карусели (смешанный пост): они войдут в архив.
+        "multi_images": len(images) if multi_count else 0,
     }
 
 
