@@ -162,3 +162,29 @@ def test_postprocessor_order_thumbnail_last():
     assert keys[-1] == "EmbedThumbnail"
     assert keys.index("FFmpegMetadata") < keys.index("EmbedThumbnail")
     assert keys.index("SponsorBlock") < keys.index("ModifyChapters")
+
+
+def test_no_merge_on_preset_cascade_asks_runner_to_split():
+    """Пресет видео — каскад с '/': запятую не подставляем (сломала бы запасные
+    варианты), а просим исполнителя выбрать по каскаду и качать раздельно."""
+    fmt, extra, _ = dl.build_format("video", height="720")
+    f2, e2, _, bundle = dl.apply_features(fmt, extra, {"no_merge": True}, "video")
+    assert f2 == fmt and e2.get(dl.SPLIT_KEY) is True
+    assert "merge_output_format" not in e2 and bundle
+    # Явная связка без каскада — как раньше, запятая.
+    f3, e3, _, _ = dl.apply_features("137+140", {}, {"no_merge": True}, "format")
+    assert f3 == "137,140" and dl.SPLIT_KEY not in e3
+
+
+def test_thumbnail_never_targets_webm():
+    """В webm обложку не встроить: склейка VP9 — в mkv, отдельный webm —
+    перепаковка в mkv до встраивания."""
+    fmt, extra, _ = dl.build_format("video", vcodec="vp9")
+    _, e, _, _ = dl.apply_features(fmt, extra, {"embed_thumbnail": True}, "video")
+    assert e["merge_output_format"] == "mkv"
+    keys = [pp["key"] for pp in e["postprocessors"]]
+    assert keys.index("FFmpegVideoRemuxer") < keys.index("EmbedThumbnail")
+    # Звук не трогаем: он уходит в opus/m4a/mp3 через FFmpegExtractAudio.
+    fmt, extra, _ = dl.build_format("audio", acodec="opus")
+    _, e, _, _ = dl.apply_features(fmt, extra, {"embed_thumbnail": True}, "audio")
+    assert "FFmpegVideoRemuxer" not in [pp["key"] for pp in e["postprocessors"]]

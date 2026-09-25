@@ -196,3 +196,28 @@ def test_second_track_is_downloading_not_processing():
     statuses = [e["status"] for e in map(_json.loads, out.getvalue().splitlines())
                 if e["ev"] == "status"]
     assert statuses == ["downloading", "processing", "downloading"]
+
+
+def test_split_tracks_picks_by_cascade_then_downloads_separately():
+    """«Не объединять» при каскаде: форматы выбраны по каскаду, дорожки
+    качаются раздельно, имена файлов — с номером формата."""
+    import io
+    import yt_dlp
+    import jobrunner
+    v = {"format_id": "137", "url": "https://x/v", "ext": "mp4", "protocol": "https",
+         "vcodec": "avc1", "acodec": "none", "height": 1080}
+    a = {"format_id": "251", "url": "https://x/a", "ext": "webm", "protocol": "https",
+         "vcodec": "none", "acodec": "opus", "abr": 130}
+    info = {"id": "v", "title": "T", "extractor": "youtube", "extractor_key": "Youtube",
+            "webpage_url": "https://www.youtube.com/watch?v=v", "formats": [a, v]}
+    job = jobrunner.Job({"id": "t", "url": info["webpage_url"],
+                         "fmt": "bestvideo+bestaudio/best",
+                         "extra": {dl.SPLIT_KEY: True}}, io.StringIO())
+    opts = job.ydl_opts()
+    assert job.split and dl.SPLIT_KEY not in opts
+    assert "%(format_id)s" in opts["outtmpl"]["default"]
+    with yt_dlp.YoutubeDL({"format": job.fmt, "quiet": True, "simulate": True}) as ydl:
+        clean = job.split_tracks(ydl, info)
+        assert "requested_formats" not in clean
+        res = ydl.process_ie_result(clean, download=True)
+    assert [d["format_id"] for d in res["requested_downloads"]] == ["137", "251"]

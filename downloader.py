@@ -276,8 +276,12 @@ def parse_features(data) -> dict:
 
 # Порядок постпроцессоров (по образцу yt-dlp CLI). Неизвестные ключи —
 # в начало, сохраняя исходный порядок (сортировка устойчивая).
-_PP_ORDER = ("FFmpegExtractAudio", "SponsorBlock", "ModifyChapters",
+_PP_ORDER = ("FFmpegExtractAudio", "FFmpegVideoRemuxer", "SponsorBlock", "ModifyChapters",
              "FFmpegMetadata", "FFmpegEmbedSubtitle", "EmbedThumbnail")
+
+
+# Флаг в extra: «выбрать по каскаду, скачать дорожки раздельно» (jobrunner).
+SPLIT_KEY = "ytg_split"
 
 
 def apply_features(fmt: str, extra: dict, features: dict,
@@ -308,6 +312,13 @@ def apply_features(fmt: str, extra: dict, features: dict,
         # файлом тоже. Иначе обложка удаляется и остаётся один файл.
         pps.append({"key": "EmbedThumbnail",
                     "already_have_thumbnail": bool(features.get("write_thumbnail"))})
+        # В webm обложку не встроить («Supported filetypes for thumbnail
+        # embedding are…» — задача падала на VP9). Как сам yt-dlp: склейку
+        # делаем в mkv, а отдельный webm-файл перепаковываем в mkv.
+        if not is_audio:
+            if extra.get("merge_output_format") == "webm":
+                extra["merge_output_format"] = "mkv"
+            pps.append({"key": "FFmpegVideoRemuxer", "preferedformat": "webm>mkv"})
 
     # Метаданные и главы — один проход FFmpegMetadata.
     if features.get("embed_metadata") or features.get("embed_chapters"):
@@ -331,12 +342,16 @@ def apply_features(fmt: str, extra: dict, features: dict,
     if features.get("write_description"):
         extra["writedescription"] = True
 
-    # Не объединять аудио/видео: осмысленно для явной связки a+b без каскада
-    # (выбор конкретного формата во «Все форматы»). Меняем '+' на ',' — yt-dlp
-    # скачает дорожки раздельно, склейку убираем. Пресетные каскады с '/'
-    # не трогаем: там всегда есть запасные варианты, и запятая их сломала бы.
-    if features.get("no_merge") and "+" in fmt and "/" not in fmt:
-        fmt = fmt.replace("+", ",")
+    # Не объединять аудио/видео. Явная связка a+b без каскада (выбор во «Все
+    # форматы»): '+' -> ',' — yt-dlp скачает дорожки раздельно. В пресетных
+    # каскадах запятая сломала бы запасные варианты ('a+b/c' -> 'a,b/c' =
+    # a и (b или c)), поэтому там — флаг исполнителю (SPLIT_KEY): он выберет
+    # дорожки по каскаду целиком и скачает выбранные раздельно.
+    if features.get("no_merge") and "+" in fmt:
+        if "/" not in fmt:
+            fmt = fmt.replace("+", ",")
+        else:
+            extra[SPLIT_KEY] = True
         extra.pop("merge_output_format", None)
 
     if pps:
@@ -636,7 +651,7 @@ _INFO_SELECTION = frozenset((
 ))
 
 
-def _unselected(info: dict) -> dict:
+def unselected_info(info: dict) -> dict:
     """Разбор без результата выбора формата — как его отдаёт экстрактор.
     Полей форматов у самого ролика экстракторы не задают (проверено на
     YouTube и SoundCloud): в корне они только от выбора."""
@@ -647,7 +662,7 @@ def _unselected(info: dict) -> dict:
 
 
 def cache_info(urls, via_egress: bool, info: dict) -> None:
-    slim = _unselected(info)
+    slim = unselected_info(info)
     now = time.time()
     with _info_lock:
         for u in {_cache_key(u) for u in urls if u}:

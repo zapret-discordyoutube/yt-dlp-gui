@@ -56,7 +56,9 @@ class Job:
         self.url: str = spec["url"]
         self.title: str = spec.get("title") or "видео"
         self.fmt: str = spec.get("fmt") or ""
-        self.extra: dict = spec.get("extra") or {}
+        self.extra: dict = dict(spec.get("extra") or {})
+        # «Не объединять» при каскадном выборе — см. split_tracks.
+        self.split: bool = bool(self.extra.pop(dl.SPLIT_KEY, False))
         self.is_live: bool = bool(spec.get("is_live"))
         self.images_mode: bool = bool(spec.get("images_mode"))
         self.bundle: bool = bool(spec.get("bundle"))
@@ -221,7 +223,10 @@ class Job:
             # Имя на диске — только id задачи: не зависит от заголовка
             # (кириллица, эмодзи, разделители пути). Красивое имя
             # пользователь получает при отдаче файла.
-            "outtmpl": {"default": f"{self.id}.%(ext)s"},
+            # Дорожки раздельно — с номером формата: у видео и звука
+            # бывает одно расширение (webm), и файлы затёрли бы друг друга.
+            "outtmpl": {"default": f"{self.id}.f%(format_id)s.%(ext)s"
+                        if self.split or "," in self.fmt else f"{self.id}.%(ext)s"},
             "noplaylist": True,
             "quiet": True,
             "no_warnings": True,
@@ -289,6 +294,19 @@ class Job:
             self.error = self.error or "Ни один ролик плейлиста не скачался"
         return path
 
+    @staticmethod
+    def split_tracks(ydl, info: dict) -> dict:
+        """«Не объединять» при каскаде: выбрать форматы по всему каскаду
+        (с его запасными вариантами), затем качать выбранные дорожки
+        раздельно ('137+140' -> '137,140'). Возвращает разбор без выбора."""
+        picked = ydl.process_ie_result(copy.deepcopy(info), download=False)
+        fid = picked.get("format_id") or ""
+        if "+" in fid:
+            sel = fid.replace("+", ",")
+            ydl.params["format"] = sel
+            ydl.format_selector = ydl.build_format_selector(sel)
+        return dl.unselected_info(picked)
+
     def download_media(self) -> str | None:
         if self.playlist:
             return self.download_playlist()
@@ -296,14 +314,18 @@ class Job:
             info = None
             if self.info:
                 try:
-                    info = ydl.process_ie_result(copy.deepcopy(self.info), download=True)
+                    src = self.split_tracks(ydl, self.info) if self.split else self.info
+                    info = ydl.process_ie_result(copy.deepcopy(src), download=True)
                 except yt_dlp.utils.DownloadError:
                     # Готовые ссылки не сработали (истекли, другой путь) —
                     # обычный путь: разобрать ролик заново.
                     if self.cancelled or self.error:
                         raise
                     info = None
-            if info is None:
+            if info is None and self.split:
+                fresh = ydl.extract_info(self.url, download=False)
+                info = ydl.process_ie_result(self.split_tracks(ydl, fresh), download=True)
+            elif info is None:
                 info = ydl.extract_info(self.url, download=True)
             reqs = (info.get("requested_downloads") or []) if isinstance(info, dict) else []
             final = reqs[0].get("filepath") if reqs else None
