@@ -177,3 +177,22 @@ def test_bundle_playlist_names_and_skips_playlist_files(tmp_path, monkeypatch):
     import os
     os.unlink(path)
     (config.DOWNLOAD_DIR / f"{tid}.000.jpg").unlink(missing_ok=True)
+
+
+def test_second_track_is_downloading_not_processing():
+    """Видео докачано — «обработка»; начался звук — снова «скачивание»:
+    иначе зависший звук сторож ловил бы по пределу склейки (час)."""
+    import io
+    import json as _json
+    import jobrunner
+    out = io.StringIO()
+    job = jobrunner.Job({"id": "t", "url": "https://www.youtube.com/watch?v=x"}, out)
+    hook = job.make_hook()
+    hook({"status": "downloading", "filename": "v", "downloaded_bytes": 1, "total_bytes": 10})
+    hook({"status": "finished", "filename": "v", "downloaded_bytes": 10, "total_bytes": 10})
+    hook({"status": "downloading", "filename": "a", "downloaded_bytes": 0, "total_bytes": 10,
+          "ytg_phase": "connect"})
+    hook({"status": "downloading", "filename": "a", "downloaded_bytes": 5, "total_bytes": 10})
+    statuses = [e["status"] for e in map(_json.loads, out.getvalue().splitlines())
+                if e["ev"] == "status"]
+    assert statuses == ["downloading", "processing", "downloading"]

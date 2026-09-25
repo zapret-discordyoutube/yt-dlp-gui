@@ -272,3 +272,58 @@ def test_egress_rotates_away_from_stuck_tunnel(server, tmp_path, fresh_racefd, m
         close()
     assert out.read_bytes() == DATA
     assert seen["n"] > 0, "подвисший туннель вообще не использовался — тест ничего не проверил"
+
+
+class _ForbiddenHandler(BaseHTTPRequestHandler):
+    """Ссылка протухла: сервер отвечает, но только 403."""
+    calls = 0
+
+    def log_message(self, *a):
+        pass
+
+    def do_GET(self):
+        type(self).calls += 1
+        self.send_response(403)
+        self.send_header("Content-Length", "0")
+        self.end_headers()
+
+
+@pytest.fixture
+def forbidden_server():
+    _ForbiddenHandler.calls = 0
+    srv = ThreadingHTTPServer(("127.0.0.1", 0), _ForbiddenHandler)
+    threading.Thread(target=srv.serve_forever, daemon=True).start()
+    yield f"http://127.0.0.1:{srv.server_address[1]}/videoplayback"
+    srv.shutdown()
+
+
+def test_dead_link_is_replaced_and_server_not_banned(server, forbidden_server, tmp_path,
+                                                     fresh_racefd, monkeypatch):
+    """403 — мёртвая ссылка, а не DPI: берём свежую, сервер в бан не идёт."""
+    monkeypatch.setattr(racefd, "RESOLVE_EVERY", 0.5)
+    monkeypatch.setattr(racefd, "_fresh_url", lambda i, s: server)
+    ydl = yt_dlp.YoutubeDL({"quiet": True, "no_warnings": True})
+    fd = racefd.RaceFD(ydl, {"quiet": True, "noprogress": True})
+    out = tmp_path / "f.mp4"
+    assert fd.real_download(str(out), {"url": forbidden_server, "filesize": len(DATA),
+                                       "http_headers": {}, "format_id": "251",
+                                       "webpage_url": "https://www.youtube.com/watch?v=f"})
+    assert out.read_bytes() == DATA
+    assert not hostban.is_banned(racefd.urlparse(forbidden_server).netloc)
+
+
+def test_all_links_dead_fails_fast(forbidden_server, tmp_path, fresh_racefd, monkeypatch):
+    """Все ссылки отвечают 403, новых нет — сдаёмся сразу (исполнитель
+    разберёт ролик заново), а не долбим 403 до MAX_FAILS."""
+    monkeypatch.setattr(racefd, "RESOLVE_EVERY", 0.2)
+    monkeypatch.setattr(racefd, "_fresh_url", lambda i, s: None)
+    monkeypatch.setattr(racefd.config, "EGRESS_POOL", [])
+    ydl = yt_dlp.YoutubeDL({"quiet": True, "no_warnings": True})
+    fd = racefd.RaceFD(ydl, {"quiet": True, "noprogress": True})
+    t0 = _time.monotonic()
+    with pytest.raises(yt_dlp.utils.DownloadError, match="403"):
+        fd.real_download(str(tmp_path / "g.mp4"),
+                         {"url": forbidden_server, "filesize": len(DATA), "http_headers": {},
+                          "format_id": "251", "webpage_url": "https://www.youtube.com/watch?v=g"})
+    assert _time.monotonic() - t0 < 10
+    assert _ForbiddenHandler.calls < 100

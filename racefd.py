@@ -43,6 +43,12 @@ CHUNK_BIG = 4 << 20
 # Отказы «слишком часто» — пауза подольше, а не новая попытка сразу.
 RATE_LIMIT_CODES = ("HTTP 401", "HTTP 429")
 RATE_LIMIT_PAUSE = 2.0
+# 403 — не DPI (тот вешает рукопожатие), а мёртвая ссылка: сервер ответил,
+# но этот файл по ней больше не отдаст. Столько 403 подряд — ссылку бросаем;
+# все ссылки мёртвые и новых не будет — загрузку прекращаем сразу (исполнитель
+# разберёт ролик заново), а не долбим 403 тысячами до MAX_FAILS.
+DEAD_LINK_CODE = "HTTP 403"
+DEAD_LINK_FAILS = 6
 WORKERS = 12             # соединений на файл
 WORKERS_BIG = 16         # на большой файл (4K и т.п.) напрямую: больше — упор в лимит запросов
 WORKERS_EGRESS_BIG = 32  # на большой файл целиком через egress-пул — по туннелю на поток
@@ -355,6 +361,8 @@ class RaceFD(FileDownloader):
             for alt in list(known_egress.values())[:1]:
                 mirrors.append([alt, 0, 0, "egress"])
         alive: dict[int, float] = {}             # поток -> время последней удачи
+        forbidden: dict[int, int] = {}           # зеркало -> 403 подряд
+        dead: set[int] = set()                   # зеркала с мёртвой ссылкой
         headers = dict(info_dict.get("http_headers") or {})
         tmp = self.temp_name(filename)
         self.report_destination(filename)
@@ -396,7 +404,8 @@ class RaceFD(FileDownloader):
             """Сервер с лучшим счётом за всю задачу; новый — в приоритете."""
             with lock:
                 snap = [list(x) for x in mirrors]
-            return max(range(len(snap)), key=lambda m: _m_score(snap[m]) + m * 0.01)
+                live = [m for m in range(len(snap)) if m not in dead] or list(range(len(snap)))
+            return max(live, key=lambda m: _m_score(snap[m]) + m * 0.01)
 
         def worker(slot: _Slot, wid: int):
             backoff = 0.0
@@ -451,7 +460,7 @@ class RaceFD(FileDownloader):
                     start = i * chunk
                     end = min(size, start + chunk) - 1
                     t_req = time.monotonic()
-                    mr = mirrors[m]
+                    mi, mr = m, mirrors[m]
                     try:
                         r = session_for(mr).get(
                             mr[0], headers={**headers, "Range": f"bytes={start}-{end}"},
@@ -477,6 +486,7 @@ class RaceFD(FileDownloader):
                         with lock:
                             fails[0] = 0
                             mr[1] += 1
+                            forbidden.pop(mi, None)
                             alive[wid] = time.monotonic()
                         _count("conn_ok")
                         if mr[3] is not None:
@@ -508,7 +518,15 @@ class RaceFD(FileDownloader):
                             fails[0] += 1
                             mr[2] += 1
                         _count("conn_fail")
-                        _m_note(mr, False)
+                        if str(e) == DEAD_LINK_CODE:
+                            # Сервер ответил — DPI его не режет, в бан не
+                            # заносим (иначе его обходили бы все загрузки).
+                            with lock:
+                                forbidden[mi] = forbidden.get(mi, 0) + 1
+                                if forbidden[mi] >= DEAD_LINK_FAILS:
+                                    dead.add(mi)
+                        else:
+                            _m_note(mr, False)
                         with lock:
                             if fails[0] >= MAX_FAILS:
                                 stop.set()
@@ -545,7 +563,15 @@ class RaceFD(FileDownloader):
                 for new in _fresh_urls(info_dict, size):
                     host = urlparse(new).netloc
                     with lock:
-                        if (len(mirrors) < MAX_MIRRORS
+                        # Тот же сервер, но у старой ссылки 403 — свежая
+                        # ссылка её заменяет.
+                        same = [i for i in dead if mirrors[i][3] is None
+                                and urlparse(mirrors[i][0]).netloc == host]
+                        if same and new != mirrors[same[0]][0]:
+                            mirrors[same[0]][0] = new
+                            dead.discard(same[0])
+                            forbidden.pop(same[0], None)
+                        elif (len(mirrors) < MAX_MIRRORS
                                 and all(x[3] is not None or urlparse(x[0]).netloc != host
                                         for x in mirrors)):
                             mirrors.append([new, 0, 0, None])
@@ -589,6 +615,16 @@ class RaceFD(FileDownloader):
 
         started = time.time()
         phase = [None]
+        links_dead = [False]
+
+        def more_links_possible() -> bool:
+            """Может ли ещё появиться ссылка: идёт разбор или раунды не кончились."""
+            if resolving.is_set() or egress_state["running"]:
+                return True
+            if (not egress_only and rounds[0] < MAX_RESOLVE_ROUNDS
+                    and len(mirrors) < MAX_MIRRORS):
+                return True
+            return bool(pool) and not egress_state["started"]
 
         def set_phase(name: str) -> None:
             """Сообщить, что происходит до первых байт: «подключаемся» или
@@ -610,6 +646,11 @@ class RaceFD(FileDownloader):
                     done_now = min(size, got[0] + sum(partial.values()))
                     all_done = len(finished) == n_chunks
                 if all_done or stop.is_set():
+                    break
+                with lock:
+                    all_dead = len(dead) == len(mirrors)
+                if all_dead and not more_links_possible():
+                    links_dead[0] = True
                     break
                 # Живых соединений мало — сервер, скорее всего, под DPI:
                 # в фоне ищем тот же файл на другом сервере (то же, что даёт
@@ -660,7 +701,8 @@ class RaceFD(FileDownloader):
                 t.join(timeout=0.5)
 
         if got[0] != size:
-            self.report_error("не удалось скачать файл целиком: источник не отвечает")
+            self.report_error("ссылка на файл больше не действует (HTTP 403)" if links_dead[0]
+                              else "не удалось скачать файл целиком: источник не отвечает")
             return False
         self.try_rename(tmp, filename)
         self._hook_progress({

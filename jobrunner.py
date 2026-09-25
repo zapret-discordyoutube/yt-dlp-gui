@@ -97,6 +97,18 @@ class Job:
         # сглаживания таймер «осталось» прыгал от секунд до минут.
         ema = [None]
         started = [False]
+        # Дорожка докачана — «обработка». Но у видео со звуком дальше идёт
+        # следующая дорожка: снова «скачивание», иначе сторож менеджера ждал
+        # бы зависшую загрузку звука по пределу склейки (час), а не простоя.
+        track_done = [False]
+
+        def next_track():
+            if track_done[0]:
+                track_done[0] = False
+                self.status("downloading")
+                # Прогресс прошлой дорожки (100%) — прочь: до первых байт
+                # новой карточка покажет «подключаемся», а не «100%».
+                self.emit(ev="progress", percent=0, speed=None, eta=None, total=None)
 
         def hook(d):
             if self.cancelled:
@@ -123,6 +135,7 @@ class Job:
 
             # Фаза до первых байт от racefd: «подключаемся» / «в обход».
             if d.get("ytg_phase"):
+                next_track()
                 self.emit(ev="phase", phase=d["ytg_phase"])
                 return
             st = d.get("status")
@@ -140,6 +153,7 @@ class Job:
                               speed=None, eta=None, total=None)
                 return
             if st == "downloading":
+                next_track()
                 if not started[0]:
                     started[0] = True
                     self.status("downloading")
@@ -173,6 +187,7 @@ class Job:
                 self.emit(ev="progress", percent=100, speed=None, eta=None,
                           total=None)
                 self.status("processing")
+                track_done[0] = True
         return hook
 
     # ---- основной путь ----

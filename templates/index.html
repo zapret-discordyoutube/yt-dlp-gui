@@ -1015,7 +1015,7 @@ function renderTask(t) {
       a.href = `/api/tasks/${t.id}/file`;
       // В отдельную вкладку: иначе при уже удалённом файле браузер уводил
       // со страницы на голый JSON с ошибкой, теряя все карточки и все
-      //活ные подписки на прогресс других загрузок.
+      // активные подписки на прогресс других загрузок.
       a.target = "_blank";
       a.rel = "noopener";
       a.innerHTML = '<svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.4" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M12 4v11M7 10l5 5 5-5M5 20h14"/></svg>Сохранить файл';
