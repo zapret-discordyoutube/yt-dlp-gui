@@ -403,6 +403,7 @@ select.input:hover{background-color:var(--surface-3)}
   transition:background var(--dur-fast) var(--ease), color var(--dur-fast) var(--ease);
 }
 .seg button:hover{color:var(--text)}
+.seg button:disabled{opacity:.4; cursor:not-allowed; color:var(--text-3, inherit)}
 .seg button[aria-checked="true"]{background:var(--surface-1); color:var(--text); box-shadow:var(--shadow-sm),
   inset 0 0 0 1px var(--border-strong)}
 .seg button:focus-visible{outline:none; box-shadow:var(--shadow-focus)}

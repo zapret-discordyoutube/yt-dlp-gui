@@ -222,3 +222,25 @@ def test_playlist_probe_lists_entries_fast(monkeypatch):
     assert [e["url"] for e in out["entries"]] == ["https://www.youtube.com/watch?v=a1",
                                                   "https://www.youtube.com/watch?v=b2"]
     assert seen.get("extract_flat") == "in_playlist"
+
+
+@pytest.mark.parametrize("formats,expected", [
+    ([{"format_id": "0", "vcodec": None, "acodec": "none", "ext": "mp4"},
+      {"format_id": "d", "vcodec": "avc1", "acodec": "none", "ext": "mp4"}], False),  # немой рил
+    ([{"format_id": "0", "vcodec": None, "acodec": None, "ext": "mp4"}], True),       # кодек неизвестен
+    ([{"format_id": "v", "vcodec": "avc1", "acodec": "none", "ext": "mp4"},
+      {"format_id": "a", "vcodec": "none", "acodec": "mp4a", "ext": "m4a"}], True),
+])
+def test_probe_reports_silent_video(monkeypatch, formats, expected):
+    """Немой ролик (Instagram/Pinterest): вкладку «Аудио» не предлагаем —
+    извлечение звука падало на ffprobe с непонятной ошибкой."""
+    monkeypatch.setattr(dl, "_info_cache", dl.OrderedDict())
+    monkeypatch.setattr(dl, "_probe_extract", lambda url, proxy: {
+        "id": "r", "title": "t", "duration": 10, "formats": formats,
+        "webpage_url": "https://www.instagram.com/reel/r/"})
+    assert dl.probe("https://www.instagram.com/reel/r/")["has_audio"] is expected
+
+
+def test_silent_audio_error_is_explained():
+    raw = ("ERROR: Postprocessing: WARNING: unable to obtain file audio codec with ffprobe")
+    assert "нет звука" in dl._clean_err(raw)

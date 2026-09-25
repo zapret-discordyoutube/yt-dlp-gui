@@ -817,6 +817,10 @@ def probe(url: str) -> dict:
         "image_count": len(images),
         "via_egress": via_egress,
         "audio_langs": audio_langs,
+        # Звука нет ни в одном формате (acodec точно "none", не неизвестен):
+        # немые ролики Instagram/Pinterest. Вкладку «Аудио» не предлагаем —
+        # извлечение звука падало на ffprobe.
+        "has_audio": any(f.get("acodec") != "none" for f in info.get("formats") or []),
     }
 
 
@@ -1470,6 +1474,8 @@ def _clean_err(msg: str) -> str:
         return "Это приватное видео — доступ к нему закрыт"
     if "Video unavailable" in msg:
         return "Видео недоступно"
+    if "unable to obtain file audio codec" in msg:
+        return "В этом ролике нет звука — его можно скачать только как видео"
     if "age" in msg.lower() and "restrict" in msg.lower():
         return "Видео с возрастным ограничением — скачать нельзя"
     return msg[:300] if msg else "Ошибка скачивания"

@@ -377,6 +377,9 @@ let settings = Object.assign(
 );
 if (!settings.pp || typeof settings.pp !== "object") settings.pp = {};
 const saveSettings = () => store.set(LS_SETTINGS, settings);
+// Режим на экране. Обычно совпадает с сохранённым settings.mode, но у
+// немого ролика «Аудио» недоступно — показываем «Видео», не затирая выбор.
+let activeMode = settings.mode;
 
 /* Флаги постобработки (чекбоксы). Имена совпадают с id вида pp-<key>. */
 const PP_KEYS = ["embed_subs","embed_thumbnail","write_thumbnail",
@@ -634,7 +637,13 @@ function renderPreview(d) {
     $("#" + id).classList.toggle("hidden", gallery));
   // У фото нет ни отрезка, ни звуковых дорожек.
   if (gallery) ["clip-row", "alang-row"].forEach(id => $("#" + id).classList.add("hidden"));
-  if (!gallery) setMode(settings.mode);
+  // Немой ролик (Instagram/Pinterest): звука нет ни в одном формате.
+  const noAudio = d.has_audio === false;
+  const audioBtn = $('#mode-seg button[data-mode="audio"]');
+  audioBtn.disabled = noAudio;
+  audioBtn.title = noAudio ? "В этом ролике нет звука" : "";
+  // Сохранённый выбор «Аудио» не затираем — для следующих роликов он в силе.
+  if (!gallery) setMode(noAudio && settings.mode === "audio" ? "video" : settings.mode, !noAudio);
   else { updateExtraRow(); updateSizeEst(); }
   $("#download-label").textContent =
     gallery ? "Скачать фото" : (d.is_live ? "Записать эфир" : "Скачать");
@@ -687,9 +696,9 @@ function updateSizeEst() {
   const bestAudio = () => fs.filter(f => f.kind === "audio")
     .sort((x, y) => (y.abr || y.tbr || 0) - (x.abr || x.tbr || 0))[0];
   let total = 0;
-  if (settings.mode === "audio") {
+  if (activeMode === "audio") {
     const a = bestAudio(); total = a ? bytesOf(a) : 0;
-  } else if (settings.mode === "all") {
+  } else if (activeMode === "all") {
     const picked = document.querySelector('input[name="fmt"]:checked');
     const f = picked && fs.find(x => x.format_id === picked.value);
     total = f ? bytesOf(f) : 0;
@@ -721,7 +730,7 @@ function parseTc(s) {
 }
 function clipFraction() {
   const dur = (current && current.duration) || 0;
-  if (!dur || settings.mode === "all" || $("#clip-row").classList.contains("hidden")) return 1;
+  if (!dur || activeMode === "all" || $("#clip-row").classList.contains("hidden")) return 1;
   const a = parseTc($("#clip-from").value) ?? 0;
   const b = parseTc($("#clip-to").value) ?? dur;
   if (b <= a) return 1;
@@ -744,14 +753,15 @@ function updateExtraRow() {
 function updateAlangRow() {
   const langs = (current && current.audio_langs) || [];
   const show = langs.length && !(current && current.is_gallery)
-    && (settings.mode === "video" || settings.mode === "audio");
+    && (activeMode === "video" || activeMode === "audio");
   $("#alang-row").classList.toggle("hidden", !show);
   updateExtraRow();
 }
 
 /* ---------- Переключение режима ---------- */
-function setMode(mode) {
-  settings.mode = mode; saveSettings();
+function setMode(mode, persist = true) {
+  activeMode = mode;
+  if (persist) { settings.mode = mode; saveSettings(); }
   document.querySelectorAll("#mode-seg button").forEach(b =>
     b.setAttribute("aria-checked", String(b.dataset.mode === mode)));
   $("#opts-video").classList.toggle("hidden", mode !== "video");
@@ -813,22 +823,22 @@ $("#download-btn").addEventListener("click", async () => {
     // Галерея: качаем фото архивом, выбор формата и постобработка неприменимы.
     body.kind = "image";
   } else {
-    if (settings.mode === "all") {
+    if (activeMode === "all") {
       const picked = document.querySelector('input[name="fmt"]:checked');
       if (!picked) { toast("Выберите формат", "error"); restore(); return; }
       body.format_id = picked.value;
-    } else if (settings.mode === "audio") {
+    } else if (activeMode === "audio") {
       body.kind = "audio"; body.acodec = settings.acodec;
     } else {
       body.kind = "video"; body.height = settings.height;
       body.vcodec = settings.vcodec; body.vaudio = settings.vaudio;
     }
     // Язык звука — только для видео/аудио и только если дорожек несколько.
-    if (settings.mode !== "all" && (current.audio_langs || []).length && settings.alang) {
+    if (activeMode !== "all" && (current.audio_langs || []).length && settings.alang) {
       body.alang = settings.alang;
     }
     // Отрезок — только для видео/аудио.
-    if (settings.mode !== "all") {
+    if (activeMode !== "all") {
       const cf = $("#clip-from").value.trim(), ct = $("#clip-to").value.trim();
       if (cf) body.clip_from = cf;
       if (ct) body.clip_to = ct;
