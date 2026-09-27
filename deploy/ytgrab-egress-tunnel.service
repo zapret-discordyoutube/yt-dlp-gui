@@ -1,0 +1,22 @@
+[Unit]
+Description=yt-grab egress SOCKS tunnel via ai-egress (<IP_AI_EGRESS>) for banned sites
+Documentation=man:ssh(1)
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=simple
+# Динамический SOCKS5 на 127.0.0.1:18099 -> выход с IP узла ai-egress.
+# Только петля: наружу порт не смотрит, открытого прокси нет.
+ExecStart=/usr/bin/ssh -p 10222 -i /root/.ssh/id_ed25519 -o BatchMode=yes -o IdentitiesOnly=yes -o StrictHostKeyChecking=accept-new -o UserKnownHostsFile=/root/.ssh/known_hosts -o ExitOnForwardFailure=yes -o ServerAliveInterval=20 -o ServerAliveCountMax=3 -o ConnectTimeout=15 -N -D 127.0.0.1:18099 root@<IP_AI_EGRESS>
+Restart=always
+# Растущая пауза: быстрые повторы при сбое пути копят штраф sshd узла
+# (PerSourcePenalties) и продлевают отказ всем туннелям с нашего IP.
+RestartSec=5
+RestartSteps=6
+RestartMaxDelaySec=180
+User=root
+NoNewPrivileges=yes
+
+[Install]
+WantedBy=multi-user.target

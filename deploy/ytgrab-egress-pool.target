@@ -1,0 +1,6 @@
+[Unit]
+Description=yt-grab egress pool: 32 SOCKS tunnels (127.0.0.1:18110-18141) via ai-egress
+Wants=ytgrab-egress-pool@18110.service ytgrab-egress-pool@18111.service ytgrab-egress-pool@18112.service ytgrab-egress-pool@18113.service ytgrab-egress-pool@18114.service ytgrab-egress-pool@18115.service ytgrab-egress-pool@18116.service ytgrab-egress-pool@18117.service ytgrab-egress-pool@18118.service ytgrab-egress-pool@18119.service ytgrab-egress-pool@18120.service ytgrab-egress-pool@18121.service ytgrab-egress-pool@18122.service ytgrab-egress-pool@18123.service ytgrab-egress-pool@18124.service ytgrab-egress-pool@18125.service ytgrab-egress-pool@18126.service ytgrab-egress-pool@18127.service ytgrab-egress-pool@18128.service ytgrab-egress-pool@18129.service ytgrab-egress-pool@18130.service ytgrab-egress-pool@18131.service ytgrab-egress-pool@18132.service ytgrab-egress-pool@18133.service ytgrab-egress-pool@18134.service ytgrab-egress-pool@18135.service ytgrab-egress-pool@18136.service ytgrab-egress-pool@18137.service ytgrab-egress-pool@18138.service ytgrab-egress-pool@18139.service ytgrab-egress-pool@18140.service ytgrab-egress-pool@18141.service 
+
+[Install]
+WantedBy=multi-user.target

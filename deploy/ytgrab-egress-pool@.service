@@ -1,0 +1,37 @@
+[Unit]
+Description=yt-grab egress pool: SOCKS tunnel #%i via ai-egress (<IP_AI_EGRESS>) for blocked YouTube servers
+Documentation=man:ssh(1)
+After=network-online.target
+Wants=network-online.target
+PartOf=ytgrab-egress-pool.target
+# Перезапуски не ограничиваются числом: паузу между ними растит
+# RestartSteps/RestartMaxDelaySec ниже.
+StartLimitIntervalSec=0
+
+[Service]
+Type=simple
+# Пул туннелей для загрузок YouTube, когда все видеосерверы ролика
+# заблокированы провайдером напрямую. Провайдер режет скорость на КАЖДОЕ
+# соединение до узла (~300-400 КБ/с), поэтому туннелей много: загрузчик
+# (racefd) раздаёт их своим потокам. Экземпляр = порт: 127.0.0.1:%i.
+# Только петля: наружу порт не смотрит, открытого прокси нет.
+# Независим от vpnbot.
+#
+# sshd на ai-egress (OpenSSH 10, PerSourcePenalties) штрафует источник за
+# соединения, не дошедшие до аутентификации, и на время штрафа отказывает
+# ВСЕМ соединениям с нашего IP. 32 туннеля, перезапускавшиеся одновременно
+# каждые 5 с, копили штраф сами и держали себя в бане: 27.09.2026 — 296
+# перезапусков в час, «drop connection … penalty». Поэтому старт разнесён
+# по экземплярам, пауза между перезапусками растёт, а keepalive не рвёт
+# туннель на коротком подвисании.
+ExecStartPre=/bin/sh -c 'sleep $$(( (%i - 18110) / 2 ))'
+ExecStart=/usr/bin/ssh -p 10222 -i /root/.ssh/id_ed25519 -o BatchMode=yes -o IdentitiesOnly=yes -o StrictHostKeyChecking=accept-new -o UserKnownHostsFile=/root/.ssh/known_hosts -o ExitOnForwardFailure=yes -o ServerAliveInterval=10 -o ServerAliveCountMax=3 -o ConnectTimeout=15 -N -D 127.0.0.1:%i root@<IP_AI_EGRESS>
+Restart=always
+RestartSec=5
+RestartSteps=6
+RestartMaxDelaySec=180
+User=root
+NoNewPrivileges=yes
+
+[Install]
+WantedBy=ytgrab-egress-pool.target
