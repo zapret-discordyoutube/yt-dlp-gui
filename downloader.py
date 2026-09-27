@@ -177,8 +177,9 @@ _FORMAT_KEYWORDS = {
 
 
 def is_youtube(url: str) -> bool:
-    """YouTube отдаёт HLS, а download_ranges с HLS зависает — обрезку там
-    отключаем. Проверяем хост, а не подстроку, чтобы не ловить чужие домены."""
+    """YouTube: свой IP, свой загрузчик (racefd), отрезок — «по запросу»
+    (racefd.SectionPP). Проверяем хост, а не подстроку, чтобы не ловить
+    чужие домены."""
     host = (urlparse(url).hostname or "").lower().removeprefix("www.")
     return host in _YT_HOSTS or host.endswith(".youtube.com") or host == "youtu.be"
 
@@ -219,8 +220,9 @@ def clip_label(start: float, end: float | None) -> str:
 
 def clip_range_opts(start: float, end: float | None) -> dict:
     """Опции yt-dlp для частичного скачивания только отрезка (сайты с прямыми
-    форматами: X, Vimeo и т.п.). Для YouTube не годится — там HLS зависает,
-    его режем полным скачиванием + ffmpeg (см. jobrunner.trim_file)."""
+    форматами: X, Vimeo и т.п.). YouTube — те же опции, но без
+    перекодирования, и ffmpeg читает через racefd.SectionSession (см.
+    jobrunner.ydl_opts); HLS там откатывается на целый ролик + trim_file."""
     rng_end = end if end is not None else float("inf")
     return {
         "download_ranges": yt_dlp.utils.download_range_func(None, [(start, rng_end)]),

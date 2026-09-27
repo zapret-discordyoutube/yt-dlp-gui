@@ -81,6 +81,7 @@ EGRESS_AFTER = 3         # сколько ждать первого байта �
 EGRESS_NEUTRAL_MBPS = 1.0  # оценка egress-пути до замеров: ниже прямого
 READ_TIMEOUT = 15        # полная тишина внутри ответа
 EGRESS_READ_TIMEOUT = 8  # через egress: подвисший туннель бросаем быстрее
+DEMAND_STALL = 2         # по запросу: нужный кусок не идёт столько, с — ищем другой сервер
 MAX_FAILS = 5000         # подряд неудач у всех соединений -> ошибка; на деле решает сторож
                          # простоя менеджера (STALL_SEC): минутный провал пути до egress
                          # при 16 потоках набирал старые 400 неудач меньше чем за минуту
@@ -337,8 +338,14 @@ def suitable(info: dict, params: dict) -> bool:
     return bool(_size_of(info))
 
 
+def _chunk_of(size: int) -> int:
+    return CHUNK_BIG if size >= BIG_FILE else CHUNK
+
+
 class RaceFD(FileDownloader):
-    def real_download(self, filename, info_dict):
+    def real_download(self, filename, info_dict, demand: _Demand | None = None):
+        """demand — режим «по запросу» (отрезок, см. SectionSession): файл не
+        качается целиком, а только куски, которые сейчас читает ffmpeg."""
         size = _size_of(info_dict)
         _count("files")
         # Зеркала: ссылки на ЭТОТ ЖЕ файл (тот же формат и размер) на разных
@@ -364,17 +371,20 @@ class RaceFD(FileDownloader):
         forbidden: dict[int, int] = {}           # зеркало -> 403 подряд
         dead: set[int] = set()                   # зеркала с мёртвой ссылкой
         headers = dict(info_dict.get("http_headers") or {})
-        tmp = self.temp_name(filename)
-        self.report_destination(filename)
-
-        fd = os.open(tmp, os.O_WRONLY | os.O_CREAT | os.O_TRUNC, 0o644)
-        os.ftruncate(fd, size)
-        chunk = CHUNK_BIG if size >= BIG_FILE else CHUNK
+        if demand is None:
+            tmp = self.temp_name(filename)
+            self.report_destination(filename)
+            fd = os.open(tmp, os.O_WRONLY | os.O_CREAT | os.O_TRUNC, 0o644)
+            os.ftruncate(fd, size)
+        else:
+            tmp, fd = None, demand.fd           # файл-подложка — у сессии
+        chunk = _chunk_of(size)
         n_chunks = (size + chunk - 1) // chunk
         todo: queue.Queue = queue.Queue()
-        for i in range(n_chunks):
-            todo.put(i)
-        finished: set[int] = set()
+        if demand is None:
+            for i in range(n_chunks):
+                todo.put(i)
+        finished: set[int] = demand.finished if demand is not None else set()
         inflight: dict[int, int] = {}
         got = [0]
         # Байты недокачанных кусков — для прогресса: на медленном соединении
@@ -389,6 +399,8 @@ class RaceFD(FileDownloader):
         stop = threading.Event()
 
         def next_chunk() -> int | None:
+            if demand is not None:
+                return next_wanted()
             try:
                 return todo.get(timeout=0.2)
             except queue.Empty:
@@ -399,6 +411,22 @@ class RaceFD(FileDownloader):
                 # «Добивание»: самый мало дублируемый недокачанный кусок.
                 left = [c for c in inflight if c not in finished]
                 return min(left, key=lambda c: inflight[c]) if left else -1
+
+        def next_wanted() -> int | None:
+            """По запросу: самый ранний нужный кусок, за которым ещё никто
+            не пошёл; все в работе — дублируем тот, что ждут дольше всех
+            (читатель стоит именно на нём), но не больше чем вдвоём."""
+            with lock:
+                if demand.closed:
+                    return None
+                left = [c for c in demand.wanted() if c not in finished]
+                for c in left:
+                    if c not in inflight:
+                        return c
+                if left and inflight.get(left[0], 0) < 2:
+                    return left[0]
+            demand.wait(0.2)
+            return -1
 
         def best_mirror() -> int:
             """Сервер с лучшим счётом за всю задачу; новый — в приоритете."""
@@ -511,6 +539,8 @@ class RaceFD(FileDownloader):
                                 got[0] += end - start + 1
                             elif i not in finished:
                                 todo.put(i)
+                        if demand is not None:
+                            demand.notify()
                         backoff = 0.0
                     except Exception as e:                    # noqa: BLE001
                         _fail_kind(e, mr[3])
@@ -631,6 +661,9 @@ class RaceFD(FileDownloader):
             «сервер заблокирован — качаем в обход». Только при смене фазы."""
             if phase[0] != name:
                 phase[0] = name
+                if demand is not None:
+                    demand.phase = name         # сообщит репортёр сессии
+                    return
                 self._hook_progress({"status": "downloading", "filename": filename,
                                      "downloaded_bytes": 0, "total_bytes": size,
                                      "ytg_phase": name}, info_dict)
@@ -639,12 +672,19 @@ class RaceFD(FileDownloader):
         for t in threads:
             t.start()
         last_t, last_b, speed = started, 0, None
+        # По запросу простаивать — норма (ffmpeg не читает): повторные разборы
+        # и egress — только когда нужный кусок не идёт (иначе лишние разборы
+        # с нашего IP — прямой путь к антиботу YouTube).
+        moved = [time.monotonic(), -1]          # когда в последний раз шли байты
         try:
             while True:
                 time.sleep(0.5)
                 with lock:
                     done_now = min(size, got[0] + sum(partial.values()))
-                    all_done = len(finished) == n_chunks
+                    all_done = (len(finished) == n_chunks if demand is None
+                                else demand.closed)
+                    waiting = demand is not None and any(
+                        c not in finished for c in demand.wanted())
                 if all_done or stop.is_set():
                     break
                 with lock:
@@ -658,28 +698,42 @@ class RaceFD(FileDownloader):
                 mono = time.monotonic()
                 with lock:
                     n_alive = sum(1 for t in alive.values() if mono - t < ALIVE_WINDOW)
-                if (n_alive < len(slots) // 2 and not resolving.is_set()
+                if demand is not None:
+                    if not waiting or done_now != moved[1]:
+                        moved[:] = [mono, done_now]
+                    stalled = mono - moved[0]
+                    # «Мало живых» по запросу: нужное не идёт DEMAND_STALL с.
+                    few_alive = stalled > DEMAND_STALL
+                else:
+                    stalled = None
+                    few_alive = n_alive < len(slots) // 2
+                if (few_alive and not resolving.is_set()
                         and not egress_only and rounds[0] < MAX_RESOLVE_ROUNDS
                         and mono - last_resolve[0] > RESOLVE_EVERY
                         and len(mirrors) < MAX_MIRRORS):
                     rounds[0] += 1
                     resolving.set()
                     threading.Thread(target=resolve, daemon=True).start()
-                maybe_prefetch(done_now)
+                if demand is None or stalled > 1:
+                    maybe_prefetch(done_now if demand is None else 0)
                 # Запасной путь через egress: все прямые серверы в бане или
                 # долго нет ни одного живого соединения. Прямые попытки при
                 # этом продолжаются — кто первый отдаст, тот и качает.
-                if pool and not egress_state["started"] and not egress_state["running"]:
+                if (pool and not egress_state["started"] and not egress_state["running"]
+                        and (demand is None or waiting)):
                     with lock:
                         direct = [x for x in mirrors if x[3] is None]
                     all_banned = bool(direct) and all(_m_banned(x) for x in direct)
-                    starving = n_alive == 0 and time.time() - started > EGRESS_AFTER
+                    starving = (n_alive == 0 and time.time() - started > EGRESS_AFTER
+                                if demand is None else stalled > EGRESS_AFTER)
                     if all_banned or starving:
                         egress_state.update(started=True, running=True)
                         threading.Thread(target=resolve_egress, daemon=True).start()
                         if done_now == 0:
                             set_phase("bypass")
                 now = time.time()
+                if demand is not None:
+                    continue       # прогресс по запросу сообщает сессия (что отдано ffmpeg)
                 if done_now == last_b:
                     continue       # без новых байт хук не зовём: менеджер видит простой
                 inst = (done_now - last_b) / max(now - last_t, 1e-3)
@@ -694,11 +748,21 @@ class RaceFD(FileDownloader):
         finally:
             with wlock:
                 stop.set()
-                os.close(fd)
+                if demand is None:
+                    os.close(fd)
             # Потоки, дочитывающие медленный ответ, не ждём: файлу они уже
             # не пишут (stop под wlock), а слот остаётся занят до их конца.
             for t in threads:
                 t.join(timeout=0.5)
+            if demand is not None:
+                # Движок встал — ждущие куски не придут: сервер рвёт ответы,
+                # ffmpeg сразу получает обрыв, а не висит до сторожа.
+                demand.stopped()
+
+        if demand is not None:
+            # Ошибку увидит ffmpeg (оборванный ответ); report_error из
+            # потока движка поднял бы исключение не там, где его ждут.
+            return demand.closed and not links_dead[0]
 
         if got[0] != size:
             self.report_error("ссылка на файл больше не действует (HTTP 403)" if links_dead[0]
@@ -711,6 +775,399 @@ class RaceFD(FileDownloader):
             "elapsed": time.time() - started,
         }, info_dict)
         return True
+
+
+class _Demand:
+    """Режим «по запросу»: какие куски файла сейчас нужны читателю (ffmpeg
+    через локальный HTTP-сервер сессии) и что уже скачано в файл-подложку."""
+
+    def __init__(self, fd: int, size: int) -> None:
+        self.fd = fd                        # разреженный файл во всю длину, уже удалён с диска
+        self.size = size
+        self.chunk = _chunk_of(size)
+        self.finished: set[int] = set()     # пишет движок под своим замком
+        self.cv = threading.Condition()
+        self._want: dict[int, int] = {}     # кусок -> сколько ответов его ждут
+        self.closed = False                 # сессия закрыта: движку — выход
+        self.dead = False                   # движок встал: новых кусков не будет
+        self.phase: str | None = None
+        self.served = 0                     # отдано ffmpeg, байт
+
+    def wanted(self) -> list[int]:
+        with self.cv:
+            return sorted(self._want)
+
+    def want(self, chunks) -> None:
+        with self.cv:
+            for c in chunks:
+                self._want[c] = self._want.get(c, 0) + 1
+            self.cv.notify_all()
+
+    def unwant(self, chunks) -> None:
+        with self.cv:
+            for c in chunks:
+                n = self._want.get(c, 0) - 1
+                if n > 0:
+                    self._want[c] = n
+                else:
+                    self._want.pop(c, None)
+
+    def notify(self) -> None:
+        with self.cv:
+            self.cv.notify_all()
+
+    def wait(self, timeout: float) -> None:
+        with self.cv:
+            self.cv.wait(timeout)
+
+    def stopped(self) -> None:
+        with self.cv:
+            self.dead = True
+            self.cv.notify_all()
+
+    def wait_chunk(self, c: int) -> bool:
+        """Дождаться куска. False — не придёт (движок встал / сессия закрыта)."""
+        with self.cv:
+            while c not in self.finished:
+                if self.dead or self.closed:
+                    return False
+                self.cv.wait(1.0)
+            return True
+
+
+def _workers_for(size: int, egress_only: bool) -> int:
+    return (WORKERS if size < BIG_FILE
+            else WORKERS_EGRESS_BIG if egress_only else WORKERS_BIG)
+
+
+def partial_ok(formats: list[dict], params: dict) -> bool:
+    """Отрезок можно качать «по запросу»: все выбранные дорожки — файлы
+    с googlevideo, которые берёт RaceFD. Иначе (HLS и т.п.) — целиком и
+    обрезка потом."""
+    return bool(formats) and all(suitable(f, params) for f in formats)
+
+
+class SectionSession:
+    """Отрезок ролика без скачивания целого файла.
+
+    yt-dlp режет отрезок одним ffmpeg (-ss/-t на каждый вход) — тот по
+    индексу файла (sidx/Cues) читает только голову и нужный кусок. Но
+    напрямую к googlevideo ffmpeg не годится: ни нашего IP для YouTube, ни
+    обхода DPI, ни зеркал. Поэтому ffmpeg получает ссылки на локальный
+    HTTP-сервер, а тот отдаёт байты, которые по запросу качает RaceFD со
+    всеми своими обходами, в разреженный файл-подложку."""
+
+    def __init__(self, ydl, formats: list[dict], est_total: int | None,
+                 should_stop=lambda: False) -> None:
+        import secrets
+        import tempfile
+        from http.server import ThreadingHTTPServer
+        self._ydl = ydl
+        self._should_stop = should_stop
+        self.est_total = est_total
+        self.token = secrets.token_hex(12)
+        self.demands: list[_Demand] = []
+        self.engines: list[threading.Thread] = []
+        egress_only = bool(ydl.params.get("proxy")) and bool(config.EGRESS_POOL)
+        self.ahead_max: list[int] = []
+        # FFmpegFD передаёт ffmpeg прокси задачи через HTTP_PROXY; к нашему
+        # серверу — только напрямую.
+        np = os.environ.get("no_proxy", "")
+        if "127.0.0.1" not in np:
+            os.environ["no_proxy"] = ",".join(x for x in (np, "127.0.0.1", "localhost") if x)
+        for f in formats:
+            size = _size_of(f)
+            # Файл-подложка: вне папки загрузок (квота считает st_size, а он
+            # во всю длину ролика) и сразу удалён — живёт, пока открыт, и не
+            # останется мусором, даже если процесс убьют.
+            fd, path = tempfile.mkstemp(prefix="ytg-part-")
+            os.unlink(path)
+            os.ftruncate(fd, size)
+            d = _Demand(fd, size)
+            self.demands.append(d)
+            self.ahead_max.append(_workers_for(size, egress_only))
+            eng = RaceFD(ydl, ydl.params)
+            t = threading.Thread(target=self._run_engine, args=(eng, f, d), daemon=True)
+            self.engines.append(t)
+        self.server = ThreadingHTTPServer(("127.0.0.1", 0), self._handler())
+        self.server.daemon_threads = True
+        threading.Thread(target=self.server.serve_forever, daemon=True).start()
+        for t in self.engines:
+            t.start()
+        self._closed = False
+        # ffmpeg закончил (FFmpegFD сообщил finished) — репортёр замолкает:
+        # иначе его запоздалое «скачивание» перебило бы «обработку».
+        self._hlock = threading.Lock()
+        self._done = False
+        ydl.add_progress_hook(self._on_progress)
+        self._reporter = threading.Thread(target=self._report, daemon=True)
+        self._reporter.start()
+
+    @staticmethod
+    def _run_engine(eng: RaceFD, f: dict, d: _Demand) -> None:
+        try:
+            eng.real_download(None, f, demand=d)
+        except Exception:                       # noqa: BLE001
+            pass
+        finally:
+            d.stopped()
+
+    def url(self, n: int) -> str:
+        return f"http://127.0.0.1:{self.server.server_address[1]}/{self.token}/{n}"
+
+    def _handler(self):
+        sess = self
+        from http.server import BaseHTTPRequestHandler
+
+        class H(BaseHTTPRequestHandler):
+            protocol_version = "HTTP/1.1"
+
+            def log_message(self, *a):          # noqa: D401
+                pass
+
+            def _target(self):
+                parts = self.path.strip("/").split("/")
+                if len(parts) != 2 or parts[0] != sess.token or not parts[1].isdigit():
+                    return None
+                n = int(parts[1])
+                return (n, sess.demands[n]) if n < len(sess.demands) else None
+
+            def _range(self, size: int):
+                m = re.fullmatch(r"bytes=(\d+)-(\d*)", self.headers.get("Range") or "bytes=0-")
+                if not m:
+                    return 0, size - 1
+                a = int(m.group(1))
+                b = min(int(m.group(2)), size - 1) if m.group(2) else size - 1
+                return a, b
+
+            def do_HEAD(self):
+                self._serve(body=False)
+
+            def do_GET(self):
+                self._serve(body=True)
+
+            def _serve(self, body: bool) -> None:
+                t = self._target()
+                if t is None:
+                    self.send_error(404)
+                    return
+                n, d = t
+                a, b = self._range(d.size)
+                if a > b or a >= d.size:
+                    self.send_response(416)
+                    self.send_header("Content-Range", f"bytes */{d.size}")
+                    self.send_header("Content-Length", "0")
+                    self.end_headers()
+                    return
+                self.send_response(206)
+                self.send_header("Content-Type", "application/octet-stream")
+                self.send_header("Accept-Ranges", "bytes")
+                self.send_header("Content-Range", f"bytes {a}-{b}/{d.size}")
+                self.send_header("Content-Length", str(b - a + 1))
+                self.end_headers()
+                # Соединение — на один ответ: оборванный ответ (движок встал)
+                # иначе оставил бы ffmpeg ждать недостающие байты без конца.
+                self.close_connection = True
+                if body:
+                    sess._stream(n, d, a, b, self.wfile)
+
+        return H
+
+    def _stream(self, n: int, d: _Demand, a: int, b: int, out) -> None:
+        """Отдать [a, b] по мере скачивания. Упреждение растёт вдвое с
+        каждым отданным куском: голову файла ffmpeg читает по чуть-чуть и
+        уходит (лишнего качать нечего), а сам отрезок — подряд, на все
+        соединения. Читатель ушёл — его куски больше не нужны."""
+        last_chunk = b // d.chunk
+        pos, ahead = a, 2
+        mine: set[int] = set()
+        try:
+            while pos <= b:
+                c = pos // d.chunk
+                need = set(range(c, min(last_chunk, c + ahead - 1) + 1)) - mine
+                if need:
+                    d.want(need)
+                    mine |= need
+                if not d.wait_chunk(c):
+                    return                      # оборвать: ffmpeg получит ошибку сразу
+                stop = min(b + 1, (c + 1) * d.chunk)
+                while pos < stop:
+                    # Порциями: прогресс и счёт отданного — по мере того,
+                    # как ffmpeg читает, а не мегабайтами.
+                    data = os.pread(d.fd, min(stop - pos, 64 << 10), pos)
+                    if not data:
+                        return
+                    out.write(data)
+                    pos += len(data)
+                    with d.cv:
+                        d.served += len(data)
+                d.unwant([c])
+                mine.discard(c)
+                ahead = min(self.ahead_max[n], ahead * 2)
+        except (BrokenPipeError, ConnectionResetError, OSError):
+            pass                                # ffmpeg дочитал и закрыл — это норма
+        finally:
+            d.unwant(mine)
+
+    def _report(self) -> None:
+        """Прогресс для интерфейса и сторожей: сколько отдано ffmpeg. FFmpegFD
+        сам молчит до конца, а без событий сторож простоя снял бы задачу.
+        Хук может оборвать задачу (размер, место, отмена) — тогда сессия
+        закрывается, и ffmpeg получает обрыв."""
+        started, last_b, last_t, speed = time.time(), -1, time.time(), None
+        phase_sent = None
+        while not self._closed:
+            time.sleep(0.5)
+            try:
+                if self._should_stop():
+                    raise RuntimeError("stop")
+                served = sum(d.served for d in self.demands)
+                phase = next((d.phase for d in self.demands if d.phase == "bypass"),
+                             "connect")
+                if served == 0 and phase != phase_sent:
+                    phase_sent = phase
+                    self._hook({"status": "downloading", "filename": "-",
+                                "downloaded_bytes": 0, "total_bytes": self.est_total,
+                                "ytg_phase": phase})
+                if served == last_b:
+                    continue
+                now = time.time()
+                if last_b >= 0:
+                    inst = (served - last_b) / max(now - last_t, 1e-3)
+                    speed = inst if speed is None else speed * 0.7 + inst * 0.3
+                last_b, last_t = served, now
+                total = max(self.est_total or 0, served) or None
+                self._hook({"status": "downloading", "filename": "-",
+                            "downloaded_bytes": served, "total_bytes": total,
+                            "speed": speed, "elapsed": now - started,
+                            "eta": int((total - served) / speed) if speed and total else None})
+            except Exception:                   # noqa: BLE001
+                self.abort()
+                return
+
+    def _on_progress(self, d: dict) -> None:
+        if d.get("status") == "finished" and d.get("filename") != "-":
+            with self._hlock:
+                self._done = True
+
+    def _hook(self, d: dict) -> None:
+        with self._hlock:
+            if self._done:
+                return
+            for ph in list(getattr(self._ydl, "_progress_hooks", [])):
+                if ph != self._on_progress:
+                    ph(d)
+
+    def abort(self) -> None:
+        """Оборвать отдачу: ffmpeg получит обрыв и завершится с ошибкой."""
+        for d in self.demands:
+            d.stopped()
+        try:
+            # И слушающий сокет: новое соединение (ffmpeg перематывает)
+            # получит отказ сразу, а не повиснет в очереди без ответа.
+            self.server.shutdown()
+            self.server.server_close()
+        except Exception:                       # noqa: BLE001
+            pass
+
+    def close(self) -> None:
+        if self._closed:
+            return
+        self._closed = True
+        try:
+            self._ydl._progress_hooks.remove(self._on_progress)
+        except (AttributeError, ValueError):
+            pass
+        for d in self.demands:
+            with d.cv:
+                d.closed = True
+                d.cv.notify_all()
+        try:
+            self.server.shutdown()
+            self.server.server_close()
+        except Exception:                       # noqa: BLE001
+            pass
+        alive = False
+        for t in self.engines:
+            t.join(timeout=3)
+            alive = alive or t.is_alive()
+        # Движок, не успевший выйти, ещё может писать в дескриптор — тогда
+        # не закрываем (номер переиспользовался бы), его закроет конец процесса.
+        if not alive:
+            for d in self.demands:
+                try:
+                    os.close(d.fd)
+                except OSError:
+                    pass
+
+
+def _section_formats(info: dict) -> list[dict]:
+    """Дорожки задачи с полями ролика (как их видит загрузчик одной дорожки)."""
+    reqs = info.get("requested_formats")
+    if not reqs:
+        return [info]
+    base = {k: v for k, v in info.items() if k != "requested_formats"}
+    return [{**base, **f} for f in reqs]
+
+
+class SectionPP:
+    """Постпроцессор before_dl: отрезок YouTube — через SectionSession.
+
+    Ссылки выбранных дорожек подменяются на локальный сервер, и штатный
+    FFmpegFD yt-dlp режет отрезок, читая только нужное. Если дорожки не
+    годятся для RaceFD (HLS и т.п.), отрезок снимается: ролик качается
+    целиком, а режет его исполнитель (on_fallback)."""
+
+    def __init__(self, ydl, full_duration: float | None, on_fallback,
+                 should_stop=lambda: False) -> None:
+        from yt_dlp.postprocessor.common import PostProcessor
+
+        outer = self
+
+        class _PP(PostProcessor):
+            def run(self, info):
+                return outer.run(info)
+
+        self.pp = _PP(ydl)
+        self._ydl = ydl
+        self.full_duration = full_duration
+        self.on_fallback = on_fallback
+        self.should_stop = should_stop
+        self.session: SectionSession | None = None
+
+    def run(self, info: dict):
+        start, end = info.get("section_start"), info.get("section_end")
+        if start is None and end is None:
+            return [], info
+        fmts = _section_formats(info)
+        if not partial_ok(fmts, self._ydl.params):
+            for k in ("section_start", "section_end", "section_title", "section_number"):
+                info.pop(k, None)
+            self.on_fallback()
+            return [], info
+        self.close()                        # прошлая попытка (повторный разбор)
+        clip_len = (end if end is not None else (self.full_duration or 0)) - (start or 0)
+        est = 0
+        for f in fmts:
+            size = _size_of(f) or 0
+            if self.full_duration and clip_len > 0:
+                est += int(size * min(1.0, clip_len / self.full_duration))
+            elif f.get("tbr") and clip_len > 0:
+                est += int(f["tbr"] * 125 * clip_len)
+        self.session = SectionSession(self._ydl, fmts, est or None, self.should_stop)
+        reqs = info.get("requested_formats")
+        if reqs:
+            info["requested_formats"] = [
+                {**f, "url": self.session.url(n), "protocol": "http", "http_headers": {}}
+                for n, f in enumerate(reqs)]
+        else:
+            info.update(url=self.session.url(0), protocol="http", http_headers={})
+        return [], info
+
+    def close(self) -> None:
+        if self.session is not None:
+            self.session.close()
+            self.session = None
 
 
 def _fresh_url(info: dict, size: int, proxy: str | None = None) -> str | None:

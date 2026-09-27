@@ -158,7 +158,6 @@ def security_headers(resp):
 def index():
     return render_template("index.html", playlist_max=config.PLAYLIST_DL_MAX, limits={
         "max_filesize_mb": config.MAX_FILESIZE_MB,
-        "clip_source_max_mb": config.CLIP_SOURCE_MAX_MB,
         "max_duration_sec": config.MAX_DURATION_SEC,
         "file_ttl_minutes": config.FILE_TTL_MINUTES,
     })

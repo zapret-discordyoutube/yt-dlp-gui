@@ -327,3 +327,145 @@ def test_all_links_dead_fails_fast(forbidden_server, tmp_path, fresh_racefd, mon
                           "format_id": "251", "webpage_url": "https://www.youtube.com/watch?v=g"})
     assert _time.monotonic() - t0 < 10
     assert _ForbiddenHandler.calls < 100
+
+
+# ---- Отрезок «по запросу»: SectionSession / SectionPP ----
+
+def _get_range(url: str, start: int, nbytes: int, timeout: float = 10) -> bytes:
+    """Прочитать nbytes с позиции start и закрыть соединение — как ffmpeg,
+    который дочитал своё и ушёл."""
+    import http.client
+    u = racefd.urlparse(url)
+    c = http.client.HTTPConnection(u.hostname, u.port, timeout=timeout)
+    c.request("GET", u.path, headers={"Range": f"bytes={start}-"})
+    r = c.getresponse()
+    assert r.status == 206
+    assert r.getheader("Content-Range") == f"bytes {start}-{len(DATA) - 1}/{len(DATA)}"
+    buf = b""
+    while len(buf) < nbytes:
+        part = r.read(min(65536, nbytes - len(buf)))
+        if not part:
+            break
+        buf += part
+    c.close()
+    return buf
+
+
+@pytest.fixture
+def no_resolve(monkeypatch):
+    """Без сети: повторные разборы и egress выключены."""
+    monkeypatch.setattr(racefd, "_fresh_url", lambda *a, **k: None)
+    monkeypatch.setattr(racefd.config, "EGRESS_POOL", [])
+
+
+def test_section_session_downloads_only_what_is_read(server, fresh_racefd, no_resolve):
+    """ffmpeg читает голову и отрезок — только эти куски и качаются."""
+    _RangeHandler.calls = 0
+    ydl = yt_dlp.YoutubeDL({"quiet": True, "no_warnings": True})
+    fmt = {"url": server, "filesize": len(DATA), "http_headers": {}, "format_id": "137",
+           "webpage_url": "https://www.youtube.com/watch?v=s"}
+    sess = racefd.SectionSession(ydl, [fmt], est_total=None)
+    try:
+        assert _get_range(sess.url(0), 0, 1000) == DATA[:1000]
+        pos = 3 * racefd.CHUNK + 777
+        assert _get_range(sess.url(0), pos, 5000) == DATA[pos:pos + 5000]
+        _time.sleep(0.3)
+        # Куски 0-1 (голова) и 3-4 (отрезок, с упреждением), но не весь файл:
+        # кусок 2 никому не был нужен.
+        assert 2 not in sess.demands[0].finished
+        assert sess.demands[0].served >= 6000
+    finally:
+        sess.close()
+
+
+def test_section_session_rejects_foreign_paths(server, fresh_racefd, no_resolve):
+    import urllib.error
+    import urllib.request
+    ydl = yt_dlp.YoutubeDL({"quiet": True, "no_warnings": True})
+    sess = racefd.SectionSession(ydl, [{"url": server, "filesize": len(DATA),
+                                        "http_headers": {}}], est_total=None)
+    try:
+        bad = sess.url(0).replace(sess.token, "0" * 24)
+        with pytest.raises(urllib.error.HTTPError):
+            urllib.request.urlopen(bad, timeout=5)
+    finally:
+        sess.close()
+
+
+def test_section_session_breaks_response_when_source_dies(forbidden_server, fresh_racefd,
+                                                          no_resolve, monkeypatch):
+    """Источник мёртв (403, новых ссылок нет) — ответ обрывается сразу:
+    ffmpeg получает ошибку, а не висит до сторожа простоя."""
+    monkeypatch.setattr(racefd, "RESOLVE_EVERY", 0.2)
+    ydl = yt_dlp.YoutubeDL({"quiet": True, "no_warnings": True})
+    sess = racefd.SectionSession(ydl, [{"url": forbidden_server, "filesize": len(DATA),
+                                        "http_headers": {}, "format_id": "251",
+                                        "webpage_url": "https://www.youtube.com/watch?v=d"}],
+                                 est_total=None)
+    try:
+        t0 = _time.monotonic()
+        assert _get_range(sess.url(0), 0, 1000, timeout=30) == b""
+        assert _time.monotonic() - t0 < 15
+    finally:
+        sess.close()
+
+
+def test_section_session_reports_progress_and_stops_on_hook_error(server, fresh_racefd,
+                                                                   no_resolve):
+    """Прогресс — то, что отдано ffmpeg; хук оборвал задачу (размер, отмена)
+    — сессия рвёт ответы."""
+    seen = []
+
+    def hook(d):
+        seen.append(d)
+        if d.get("downloaded_bytes"):
+            raise yt_dlp.utils.DownloadCancelled()
+    ydl = yt_dlp.YoutubeDL({"quiet": True, "no_warnings": True, "progress_hooks": [hook]})
+    sess = racefd.SectionSession(ydl, [{"url": server, "filesize": len(DATA),
+                                        "http_headers": {}}], est_total=len(DATA))
+    try:
+        assert _get_range(sess.url(0), 0, 1000) == DATA[:1000]
+        deadline = _time.monotonic() + 5
+        while not sess.demands[0].dead and _time.monotonic() < deadline:
+            _time.sleep(0.1)
+        assert sess.demands[0].dead
+        assert any(d.get("downloaded_bytes") for d in seen)
+        with pytest.raises(ConnectionRefusedError):     # новое соединение — отказ сразу
+            _get_range(sess.url(0), 0, 1000, timeout=5)
+    finally:
+        sess.close()
+
+
+def test_section_pp_rewrites_googlevideo_and_falls_back_on_hls(monkeypatch):
+    """Дорожки для RaceFD — ссылки на локальный сервер; HLS — отрезок снят,
+    ролик качается целиком (on_fallback)."""
+    monkeypatch.setattr(racefd, "SectionSession", lambda ydl, fmts, est, stop: _FakeSess(fmts, est))
+    ydl = yt_dlp.YoutubeDL({"quiet": True})
+    fell = []
+    pp = racefd.SectionPP(ydl, 3600, on_fallback=lambda: fell.append(1))
+    gv = "https://rr1---sn-x.googlevideo.com/videoplayback?clen="
+    info = {"id": "x", "section_start": 600, "section_end": 840, "webpage_url": "w",
+            "requested_formats": [
+                {"format_id": "137", "protocol": "https", "url": gv + "3600000000"},
+                {"format_id": "140", "protocol": "https", "url": gv + "360000000"}]}
+    _, out = pp.run(info)
+    assert [f["url"] for f in out["requested_formats"]] == ["local/0", "local/1"]
+    assert pp.session.est == (3600000000 + 360000000) * 240 // 3600
+    assert not fell
+    hls = {"id": "x", "section_start": 600, "section_end": 840, "protocol": "m3u8_native",
+           "url": "https://manifest.googlevideo.com/x.m3u8"}
+    _, out = pp.run(hls)
+    assert fell and "section_start" not in out and out["url"].endswith(".m3u8")
+    no_clip = {"id": "x", "protocol": "https", "url": gv + "1"}
+    assert pp.run(dict(no_clip))[1] == no_clip
+
+
+class _FakeSess:
+    def __init__(self, fmts, est):
+        self.est = est
+
+    def url(self, n):
+        return f"local/{n}"
+
+    def close(self):
+        pass

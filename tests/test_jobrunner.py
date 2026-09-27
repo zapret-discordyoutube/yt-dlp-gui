@@ -231,14 +231,15 @@ def _yt_clip_job(**spec):
 
 
 def test_youtube_clip_source_has_own_size_cap(monkeypatch):
-    """Отрезок с YouTube режется из целого ролика: исходник больше
-    MAX_FILESIZE_MB — не повод обрывать, обрыв только на своём потолке."""
+    """Отрезок с YouTube на откате (HLS) режется из целого ролика: исходник
+    больше MAX_FILESIZE_MB — не повод обрывать, обрыв только на своём потолке."""
     import pytest
     import yt_dlp
     monkeypatch.setattr(config, "MAX_FILESIZE_MB", 10)
     monkeypatch.setattr(config, "CLIP_SOURCE_MAX_MB", 40)
     job = _yt_clip_job()
     assert job.ydl_opts()["max_filesize"] == 40 * 1048576
+    job.trim_after = True                   # SectionPP откатился на целый ролик
     hook = job.make_hook()
     hook({"status": "downloading", "filename": "v", "downloaded_bytes": 30 * 1048576})
     with pytest.raises(yt_dlp.utils.DownloadCancelled):
@@ -255,7 +256,8 @@ def test_youtube_clip_source_has_own_size_cap(monkeypatch):
 
 
 def test_youtube_clip_too_big_source_refused_before_download(monkeypatch, tmp_path):
-    """Размер целого ролика известен из разбора — отказ сразу, без скачивания."""
+    """Дорожки не для RaceFD (откат на целый ролик): размер целого известен
+    из разбора — отказ сразу, без скачивания."""
     import pytest
     import yt_dlp
     monkeypatch.setattr(config, "CLIP_SOURCE_MAX_MB", 40)
@@ -294,7 +296,49 @@ def test_failed_trim_does_not_serve_oversized_source(monkeypatch, tmp_path):
     src = tmp_path / ("c" * 32 + ".mp4")
     src.write_bytes(b"\0" * 2 * 1048576)
     job = _yt_clip_job()
+    job.trim_after = True
     monkeypatch.setattr(job, "download_media", lambda: str(src))
     monkeypatch.setattr(jobrunner, "trim_file", lambda path, clip: None)
     res = job.run()
     assert res["status"] == "error" and "превышает" in res["error"]
+
+
+def _gv_info(video_mb: int, audio_mb: int, duration: int = 3600) -> dict:
+    gv = "https://rr1---sn-x.googlevideo.com/videoplayback?clen="
+    v = {"format_id": "137", "url": gv + str(video_mb << 20), "ext": "mp4", "protocol": "https",
+         "vcodec": "avc1", "acodec": "none", "height": 1080, "filesize": video_mb << 20}
+    a = {"format_id": "140", "url": gv + str(audio_mb << 20), "ext": "m4a", "protocol": "https",
+         "vcodec": "none", "acodec": "mp4a", "abr": 128, "filesize": audio_mb << 20}
+    return {"id": "x", "title": "T", "extractor": "youtube", "extractor_key": "Youtube",
+            "duration": duration, "webpage_url": "https://www.youtube.com/watch?v=x",
+            "formats": [a, v]}
+
+
+def test_youtube_clip_by_demand_checks_clip_not_whole_source(monkeypatch, tmp_path):
+    """Отрезок «по запросу»: ролик в 5 ГБ — не помеха, считается доля
+    отрезка (4 минуты из часа); слишком длинный отрезок — отказ сразу."""
+    import pytest
+    import yt_dlp
+    monkeypatch.setattr(config, "CLIP_SOURCE_MAX_MB", 4096)
+    monkeypatch.setattr(config, "MAX_FILESIZE_MB", 2048)
+    monkeypatch.setattr(config, "DISK_QUOTA_MB", 5120)
+    monkeypatch.setattr(config, "DOWNLOAD_DIR", tmp_path)
+    info = _gv_info(5000, 100)
+    job = _yt_clip_job(fmt="bestvideo+bestaudio/best", info=info)
+    assert job.clip == (60.0, 300.0)
+    with yt_dlp.YoutubeDL({"format": job.fmt, "quiet": True, "simulate": True}) as ydl:
+        job.check_clip_source(ydl, info)
+        assert job.error is None
+        long = _yt_clip_job(fmt="bestvideo+bestaudio/best", info=info, clip=[0, 3000])
+        with pytest.raises(yt_dlp.utils.DownloadCancelled):
+            long.check_clip_source(ydl, info)
+        assert "Отрезок превышает" in long.error
+
+
+def test_youtube_clip_uses_ranges_without_reencode():
+    """YouTube: отрезок — download_ranges без перекодирования (режет FFmpegFD
+    через SectionSession); обрезка после скачивания — только на откате."""
+    job = _yt_clip_job()
+    opts = job.ydl_opts()
+    assert "download_ranges" in opts and opts["force_keyframes_at_cuts"] is False
+    assert job.trim_after is False

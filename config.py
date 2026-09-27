@@ -83,10 +83,10 @@ PROXY = os.environ.get("YTG_PROXY", "").strip()
 # скачивание идёт тоже через него. Пусто -> механизм выключен.
 EGRESS_PROXY = os.environ.get("YTG_EGRESS_PROXY", "").strip()
 MAX_FILESIZE_MB = int(os.environ.get("YTG_MAX_FILESIZE_MB", "2048"))   # потолок на один файл
-# Отрезок с YouTube режется из ЦЕЛОГО скачанного ролика (см. jobrunner.run),
-# поэтому исходнику нужен свой потолок: отрезок в 140 МБ из двухчасового
-# ролика упирался в MAX_FILESIZE_MB на полном файле. Результат обрезки —
-# по-прежнему не больше MAX_FILESIZE_MB; место держит квота DISK_QUOTA_MB.
+# Отрезок с YouTube качается «по запросу» — только нужные байты (racefd.
+# SectionSession). Но HLS-дорожки так не умеют: тогда ролик качается ЦЕЛИКОМ
+# и режется потом (jobrunner.trim_file) — для этого отката свой потолок на
+# целый ролик. Результат — по-прежнему не больше MAX_FILESIZE_MB.
 CLIP_SOURCE_MAX_MB = int(os.environ.get("YTG_CLIP_SOURCE_MAX_MB", "4096"))
 # Плейлист архивом: не больше стольких роликов за раз (архив целиком — в
 # пределах MAX_FILESIZE_MB). Больше — и разборы подряд грозят антиботом YouTube.

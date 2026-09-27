@@ -75,9 +75,13 @@ class Job:
         self.clip: tuple[float, float | None] | None = (
             (float(clip[0]), None if clip[1] is None else float(clip[1]))
             if clip else None)
-        # YouTube: отрезок режем из целого скачанного ролика (HLS не даёт
-        # скачать секцию) — исходник меряем своим потолком, результат — общим.
-        self.trim_after: bool = bool(self.clip) and dl.is_youtube(self.url)
+        # YouTube: отрезок качается «по запросу» (racefd.SectionPP) — только
+        # нужные байты. Если дорожки для этого не годятся (HLS), SectionPP
+        # ставит trim_after: ролик качается целиком и режется потом; тогда
+        # исходник меряем своим потолком, результат — общим.
+        self.yt_clip: bool = bool(self.clip) and dl.is_youtube(self.url)
+        self.trim_after = False
+        self._section_pp: racefd.SectionPP | None = None
         self.cancelled = False
         self.pl_done = 0
         self.error: str | None = None     # причина, если оборвал сторож
@@ -199,8 +203,9 @@ class Job:
 
     @property
     def source_max_mb(self) -> int:
-        """Потолок скачиваемого: для обрезки после скачивания — целый ролик."""
-        return config.CLIP_SOURCE_MAX_MB if self.trim_after else config.MAX_FILESIZE_MB
+        """Потолок скачиваемого: у отрезка YouTube на откате качается целый
+        ролик. По запросу скачанное ≈ отрезку, итог проверяет run()."""
+        return config.CLIP_SOURCE_MAX_MB if self.yt_clip else config.MAX_FILESIZE_MB
 
     def too_big_error(self) -> str:
         if self.trim_after:
@@ -210,16 +215,26 @@ class Job:
         return "Файл превышает допустимый размер"
 
     def check_clip_source(self, ydl, info: dict) -> None:
-        """До скачивания: целый ролик под отрезок влезает в потолок и в квоту.
-        Размер — из разбора (выбор форматов без сети). Иначе пользователь
-        ждал бы до обрыва на потолке, а мы тянули бы гигабайты впустую."""
+        """До скачивания: то, что придётся скачать под отрезок, влезает в
+        потолок и в квоту. По запросу — примерно доля отрезка, на откате —
+        целый ролик. Размер — из разбора (выбор форматов без сети). Иначе
+        пользователь ждал бы до обрыва на потолке, а мы тянули бы гигабайты
+        впустую."""
         try:
             picked = ydl.process_ie_result(copy.deepcopy(info), download=False)
         except yt_dlp.utils.DownloadError:
             return                  # выбор не сошёлся — решит обычный путь
         parts = picked.get("requested_formats") or [picked]
         size = sum(f.get("filesize") or f.get("filesize_approx") or 0 for f in parts)
-        if size > config.CLIP_SOURCE_MAX_MB * 1048576:
+        dur = info.get("duration")
+        if racefd.partial_ok(parts, ydl.params) and dur:
+            start, end = self.clip
+            size = int(size * max(0.0, min(1.0, ((end or dur) - start) / dur)))
+            if size > config.MAX_FILESIZE_MB * 1048576:
+                self.error = "Отрезок превышает допустимый размер, выберите покороче"
+                raise yt_dlp.utils.DownloadCancelled()
+        elif size > config.CLIP_SOURCE_MAX_MB * 1048576:
+            self.trim_after = True          # для текста ошибки: дело в целом ролике
             self.error = self.too_big_error()
             raise yt_dlp.utils.DownloadCancelled()
         used = 0
@@ -242,13 +257,14 @@ class Job:
             final = self.download_media()
         if self.cancelled:
             raise yt_dlp.utils.DownloadCancelled()
-        # Отрезок на YouTube режем после полного скачивания: HLS не даёт
-        # скачать секцию (download_ranges на нём зависает).
+        # Откат отрезка YouTube (дорожки не для RaceFD, напр. HLS): ролик
+        # скачан целиком — режем здесь.
         if self.trim_after and final and os.path.exists(final):
             self.status("processing")
             final = trim_file(final, self.clip) or final
-            # Исходник качали сверх MAX_FILESIZE_MB: если обрезка не удалась
-            # (или отрезок почти во весь ролик) — такой файл не отдаём.
+        # Исходник могли качать сверх MAX_FILESIZE_MB: если обрезка не удалась
+        # (или отрезок почти во весь ролик) — такой файл не отдаём.
+        if self.yt_clip and final and os.path.exists(final):
             if os.path.getsize(final) > config.MAX_FILESIZE_MB * 1048576:
                 return {"status": "error", "error": "Не удалось вырезать отрезок, а ролик "
                                                     "целиком превышает допустимый размер"}
@@ -325,7 +341,12 @@ class Job:
                     [f"duration < {config.MAX_DURATION_SEC}", "!duration"]),
             })
         # Отрезок вне YouTube — частичная загрузка только нужного куска.
-        if self.clip and not dl.is_youtube(self.url):
+        if self.yt_clip:
+            # Точные резы (перекодирование) для YouTube не берём: 1080p на
+            # гипервизоре с CPUWeight=20 — долго; режем по ключевым кадрам,
+            # как раньше trim_file.
+            opts.update(dl.clip_range_opts(*self.clip), force_keyframes_at_cuts=False)
+        elif self.clip:
             opts.update(dl.clip_range_opts(*self.clip))
         opts.update(self.extra)
         return opts
@@ -368,29 +389,42 @@ class Job:
         if self.playlist:
             return self.download_playlist()
         with yt_dlp.YoutubeDL(self.ydl_opts()) as ydl:
-            info = None
-            if self.info and self.trim_after:
-                self.check_clip_source(ydl, self.info)
-            if self.info:
-                try:
-                    src = self.split_tracks(ydl, self.info) if self.split else self.info
-                    info = ydl.process_ie_result(copy.deepcopy(src), download=True)
-                except yt_dlp.utils.DownloadError:
-                    # Готовые ссылки не сработали (истекли, другой путь) —
-                    # обычный путь: разобрать ролик заново.
-                    if self.cancelled or self.error:
-                        raise
-                    info = None
-            if info is None and self.split:
-                fresh = ydl.extract_info(self.url, download=False)
-                info = ydl.process_ie_result(self.split_tracks(ydl, fresh), download=True)
-            elif info is None:
-                info = ydl.extract_info(self.url, download=True)
-            reqs = (info.get("requested_downloads") or []) if isinstance(info, dict) else []
-            final = reqs[0].get("filepath") if reqs else None
-            if final:
-                return final
-            final = ydl.prepare_filename(info)
+            if self.yt_clip:
+                self._section_pp = racefd.SectionPP(
+                    ydl, (self.info or {}).get("duration"),
+                    on_fallback=lambda: setattr(self, "trim_after", True),
+                    should_stop=lambda: self.cancelled)
+                ydl.add_post_processor(self._section_pp.pp, when="before_dl")
+            try:
+                return self._download_media(ydl)
+            finally:
+                if self._section_pp is not None:
+                    self._section_pp.close()
+
+    def _download_media(self, ydl) -> str | None:
+        info = None
+        if self.info and self.yt_clip:
+            self.check_clip_source(ydl, self.info)
+        if self.info:
+            try:
+                src = self.split_tracks(ydl, self.info) if self.split else self.info
+                info = ydl.process_ie_result(copy.deepcopy(src), download=True)
+            except yt_dlp.utils.DownloadError:
+                # Готовые ссылки не сработали (истекли, другой путь) —
+                # обычный путь: разобрать ролик заново.
+                if self.cancelled or self.error:
+                    raise
+                info = None
+        if info is None and self.split:
+            fresh = ydl.extract_info(self.url, download=False)
+            info = ydl.process_ie_result(self.split_tracks(ydl, fresh), download=True)
+        elif info is None:
+            info = ydl.extract_info(self.url, download=True)
+        reqs = (info.get("requested_downloads") or []) if isinstance(info, dict) else []
+        final = reqs[0].get("filepath") if reqs else None
+        if final:
+            return final
+        final = ydl.prepare_filename(info)
         # Постпроцессор аудио меняет расширение.
         for pp in self.extra.get("postprocessors") or []:
             if pp.get("key") == "FFmpegExtractAudio":
@@ -607,6 +641,10 @@ def _execute(job: Job) -> dict:
     except (yt_dlp.utils.DownloadError, yt_dlp.utils.UnavailableVideoError) as e:
         if job.cancelled:
             return {"status": "cancelled"}
+        if job.error:
+            # Сторож оборвал отрезок из потока сессии (racefd.SectionSession):
+            # ffmpeg упал с обрывом, но причина — наша, а не yt-dlp.
+            return {"status": "error", "error": job.error}
         logging.warning("загрузка не удалась (%s): %s",
                         dl._host_of(job.url), type(e).__name__)
         return {"status": "error", "error": dl._clean_err(str(e))}
