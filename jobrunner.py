@@ -75,6 +75,9 @@ class Job:
         self.clip: tuple[float, float | None] | None = (
             (float(clip[0]), None if clip[1] is None else float(clip[1]))
             if clip else None)
+        # YouTube: отрезок режем из целого скачанного ролика (HLS не даёт
+        # скачать секцию) — исходник меряем своим потолком, результат — общим.
+        self.trim_after: bool = bool(self.clip) and dl.is_youtube(self.url)
         self.cancelled = False
         self.pl_done = 0
         self.error: str | None = None     # причина, если оборвал сторож
@@ -122,8 +125,8 @@ class Job:
             # Content-Length и не работает для HLS/DASH — считаем сами,
             # по каждому файлу отдельно (видео и звук качаются порознь).
             per_file[d.get("filename") or "?"] = d.get("downloaded_bytes") or 0
-            if sum(per_file.values()) > config.MAX_FILESIZE_MB * 1048576:
-                self.error = "Файл превышает допустимый размер"
+            if sum(per_file.values()) > self.source_max_mb * 1048576:
+                self.error = self.too_big_error()
                 raise yt_dlp.utils.DownloadCancelled()
 
             now = time.monotonic()
@@ -194,6 +197,42 @@ class Job:
                 track_done[0] = True
         return hook
 
+    @property
+    def source_max_mb(self) -> int:
+        """Потолок скачиваемого: для обрезки после скачивания — целый ролик."""
+        return config.CLIP_SOURCE_MAX_MB if self.trim_after else config.MAX_FILESIZE_MB
+
+    def too_big_error(self) -> str:
+        if self.trim_after:
+            return (f"Ролик целиком превышает {_fmt_gb(config.CLIP_SOURCE_MAX_MB)}: "
+                    "отрезок с YouTube вырезается из целого ролика, а такие большие "
+                    "не скачиваются. Выберите качество пониже")
+        return "Файл превышает допустимый размер"
+
+    def check_clip_source(self, ydl, info: dict) -> None:
+        """До скачивания: целый ролик под отрезок влезает в потолок и в квоту.
+        Размер — из разбора (выбор форматов без сети). Иначе пользователь
+        ждал бы до обрыва на потолке, а мы тянули бы гигабайты впустую."""
+        try:
+            picked = ydl.process_ie_result(copy.deepcopy(info), download=False)
+        except yt_dlp.utils.DownloadError:
+            return                  # выбор не сошёлся — решит обычный путь
+        parts = picked.get("requested_formats") or [picked]
+        size = sum(f.get("filesize") or f.get("filesize_approx") or 0 for f in parts)
+        if size > config.CLIP_SOURCE_MAX_MB * 1048576:
+            self.error = self.too_big_error()
+            raise yt_dlp.utils.DownloadCancelled()
+        used = 0
+        for p in config.DOWNLOAD_DIR.iterdir():
+            if not p.name.startswith(self.id + "."):
+                try:
+                    used += p.stat().st_size
+                except OSError:
+                    pass
+        if used + size > config.DISK_QUOTA_MB * 1048576:
+            self.error = "Сейчас на сервере мало места под целый ролик, попробуйте позже"
+            raise yt_dlp.utils.DownloadCancelled()
+
     # ---- основной путь ----
     def run(self) -> dict:
         self.status("preparing")
@@ -205,9 +244,14 @@ class Job:
             raise yt_dlp.utils.DownloadCancelled()
         # Отрезок на YouTube режем после полного скачивания: HLS не даёт
         # скачать секцию (download_ranges на нём зависает).
-        if self.clip and dl.is_youtube(self.url) and final and os.path.exists(final):
+        if self.trim_after and final and os.path.exists(final):
             self.status("processing")
             final = trim_file(final, self.clip) or final
+            # Исходник качали сверх MAX_FILESIZE_MB: если обрезка не удалась
+            # (или отрезок почти во весь ролик) — такой файл не отдаём.
+            if os.path.getsize(final) > config.MAX_FILESIZE_MB * 1048576:
+                return {"status": "error", "error": "Не удалось вырезать отрезок, а ролик "
+                                                    "целиком превышает допустимый размер"}
         if self.bundle:
             self.status("processing")
             final = bundle_outputs(self.id, self.title) or final
@@ -243,7 +287,7 @@ class Job:
             "concurrent_fragment_downloads": config.CONCURRENT_FRAGMENTS,
             "logger": dl._QuietLogger(),
             "format": self.fmt,
-            "max_filesize": config.MAX_FILESIZE_MB * 1024 * 1024,
+            "max_filesize": self.source_max_mb * 1024 * 1024,
             "progress_hooks": [self.make_hook()],
         }
         if self.proxy:
@@ -325,6 +369,8 @@ class Job:
             return self.download_playlist()
         with yt_dlp.YoutubeDL(self.ydl_opts()) as ydl:
             info = None
+            if self.info and self.trim_after:
+                self.check_clip_source(ydl, self.info)
             if self.info:
                 try:
                     src = self.split_tracks(ydl, self.info) if self.split else self.info
@@ -416,6 +462,11 @@ class Job:
                 self.emit(ev="progress", percent=round(n / len(items) * 100, 1),
                           speed=None, eta=None, total=total)
         return saved
+
+
+def _fmt_gb(mb: int) -> str:
+    gb = mb / 1024
+    return f"{gb:g} ГБ" if gb >= 1 else f"{mb} МБ"
 
 
 def trim_file(path: str, clip: tuple) -> str | None:

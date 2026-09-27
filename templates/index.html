@@ -736,7 +736,12 @@ function updateSizeEst() {
   if (total > 0) {
     // С отрезком файл меньше пропорционально его доле в ролике.
     const clip = clipFraction();
-    el.textContent = "≈ " + fmtBytes(Math.round(total * clip)) + (clip < 1 ? " · отрезок" : "");
+    let note = clip < 1 ? " · отрезок" : "";
+    // Отрезок с YouTube вырезается из целого ролика — у целого свой потолок.
+    if (clip < 1 && /^youtube/i.test(current.extractor || "")
+        && total > {{ limits.clip_source_max_mb }} * 1048576)
+      note += " · ролик целиком " + fmtBytes(total) + " — больше лимита, выберите качество пониже";
+    el.textContent = "≈ " + fmtBytes(Math.round(total * clip)) + note;
     box.classList.remove("hidden");
   } else {
     box.classList.add("hidden");
