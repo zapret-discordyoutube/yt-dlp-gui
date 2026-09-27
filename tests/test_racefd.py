@@ -149,6 +149,22 @@ def _silent_server():
 
 
 @pytest.fixture
+def env_proxy(monkeypatch):
+    """Чужой прокси в окружении (как в оболочке с HTTP_PROXY): requests
+    ставит его выше Session.proxies. Сессиям racefd он не должен мешать."""
+    for k in ("HTTP_PROXY", "HTTPS_PROXY", "http_proxy", "https_proxy", "ALL_PROXY"):
+        monkeypatch.setenv(k, "http://127.0.0.1:9")
+    for k in ("NO_PROXY", "no_proxy"):
+        monkeypatch.delenv(k, raising=False)
+
+
+def test_direct_session_ignores_env_proxy(server, env_proxy):
+    """Прямой путь — напрямую со своего IP, мимо прокси окружения."""
+    r = racefd._direct_session().get(server, headers={"Range": "bytes=0-99"}, timeout=5)
+    assert r.status_code == 206 and r.content == DATA[:100]
+
+
+@pytest.fixture
 def fresh_racefd(monkeypatch):
     """Чистые знания о серверах; «IP» = host:port (в тестах всё на 127.0.0.1)."""
     monkeypatch.setattr(racefd, "_HOSTS", {})
@@ -221,7 +237,7 @@ def test_score_prefers_fast_and_demotes_slow(fresh_racefd, monkeypatch):
     hostban.clear("fast:1")
 
 
-def test_falls_back_to_egress_pool(server, tmp_path, fresh_racefd, monkeypatch):
+def test_falls_back_to_egress_pool(server, tmp_path, fresh_racefd, env_proxy, monkeypatch):
     """Напрямую ничего не проходит — загрузка сама разбирает ролик через
     egress и качает через пул туннелей. «Туннель» здесь — HTTP-прокси
     (тестовый сервер принимает запрос с абсолютным адресом), а ссылка ведёт
@@ -251,7 +267,8 @@ def test_falls_back_to_egress_pool(server, tmp_path, fresh_racefd, monkeypatch):
     assert racefd.STATS["egress_bytes"] > 0
 
 
-def test_egress_rotates_away_from_stuck_tunnel(server, tmp_path, fresh_racefd, monkeypatch):
+def test_egress_rotates_away_from_stuck_tunnel(server, tmp_path, fresh_racefd, env_proxy,
+                                                monkeypatch):
     """Задача целиком через egress, один туннель пула подвис — потоки на нём
     переходят на следующий туннель, а не переподключаются через тот же."""
     dead_url, seen, close = _silent_server()

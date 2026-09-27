@@ -101,11 +101,16 @@ class _SourceAdapter(requests.adapters.HTTPAdapter):
         return super().init_poolmanager(*args, **kwargs)
 
 
+# Маршрут у сессий racefd всегда явный: напрямую со своего IP или в свой
+# туннель пула. Переменные HTTP(S)_PROXY окружения им не указ: requests
+# ставит их ВЫШЕ Session.proxies — и туннели пула подменялись бы чужим
+# прокси (так висели тесты egress-пула в оболочке с HTTP_PROXY).
 def _direct_session() -> requests.Session:
     """Сессия для прямых соединений с видеосерверами — с IP для YouTube,
     если он задан (ссылки на файлы привязаны к IP, с которого их получили).
     Egress-сессии сюда не относятся: они ходят в локальный SOCKS."""
     s = requests.Session()
+    s.trust_env = False
     if config.YT_SOURCE_IP:
         ad = _SourceAdapter(config.YT_SOURCE_IP)
         s.mount("https://", ad)
@@ -457,6 +462,7 @@ class RaceFD(FileDownloader):
                 if esess[0] is None:
                     px = pool[tunnel[0] % len(pool)]
                     esess[0] = requests.Session()
+                    esess[0].trust_env = False
                     esess[0].proxies = {"http": px, "https": px}
                 return esess[0]
 
