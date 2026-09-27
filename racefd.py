@@ -82,6 +82,8 @@ EGRESS_NEUTRAL_MBPS = 1.0  # оценка egress-пути до замеров: �
 READ_TIMEOUT = 15        # полная тишина внутри ответа
 EGRESS_READ_TIMEOUT = 8  # через egress: подвисший туннель бросаем быстрее
 DEMAND_STALL = 2         # по запросу: нужный кусок не идёт столько, с — ищем другой сервер
+DEMAND_AHEAD = 24 << 20  # по запросу: упреждение, байт — всё сверх него на конце отрезка впустую
+DEMAND_DUP_AFTER = 1.0   # по запросу: кусок, которого ждёт ffmpeg, дублируем не сразу, с
 MAX_FAILS = 5000         # подряд неудач у всех соединений -> ошибка; на деле решает сторож
                          # простоя менеджера (STALL_SEC): минутный провал пути до egress
                          # при 16 потоках набирал старые 400 неудач меньше чем за минуту
@@ -420,10 +422,13 @@ class RaceFD(FileDownloader):
                 if demand.closed:
                     return None
                 left = [c for c in demand.wanted() if c not in finished]
+                now = time.monotonic()
                 for c in left:
                     if c not in inflight:
+                        demand.taken[c] = now
                         return c
-                if left and inflight.get(left[0], 0) < 2:
+                if (left and inflight.get(left[0], 0) < 2
+                        and now - demand.taken.get(left[0], now) > DEMAND_DUP_AFTER):
                     return left[0]
             demand.wait(0.2)
             return -1
@@ -792,6 +797,7 @@ class _Demand:
         self.dead = False                   # движок встал: новых кусков не будет
         self.phase: str | None = None
         self.served = 0                     # отдано ffmpeg, байт
+        self.taken: dict[int, float] = {}   # кусок -> когда за ним пошли (под замком движка)
 
     def wanted(self) -> list[int]:
         with self.cv:
@@ -885,7 +891,8 @@ class SectionSession:
             os.ftruncate(fd, size)
             d = _Demand(fd, size)
             self.demands.append(d)
-            self.ahead_max.append(_workers_for(size, egress_only))
+            self.ahead_max.append(max(2, min(_workers_for(size, egress_only),
+                                             DEMAND_AHEAD // d.chunk)))
             eng = RaceFD(ydl, ydl.params)
             t = threading.Thread(target=self._run_engine, args=(eng, f, d), daemon=True)
             self.engines.append(t)
@@ -975,11 +982,11 @@ class SectionSession:
 
     def _stream(self, n: int, d: _Demand, a: int, b: int, out) -> None:
         """Отдать [a, b] по мере скачивания. Упреждение растёт вдвое с
-        каждым отданным куском: голову файла ffmpeg читает по чуть-чуть и
-        уходит (лишнего качать нечего), а сам отрезок — подряд, на все
-        соединения. Читатель ушёл — его куски больше не нужны."""
+        каждым отданным куском (до DEMAND_AHEAD): голову файла ffmpeg читает
+        по чуть-чуть и уходит — лишнего не качаем, а сам отрезок — подряд,
+        на много соединений. Читатель ушёл — его куски больше не нужны."""
         last_chunk = b // d.chunk
-        pos, ahead = a, 2
+        pos, ahead = a, 1
         mine: set[int] = set()
         try:
             while pos <= b:

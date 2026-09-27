@@ -359,21 +359,39 @@ def no_resolve(monkeypatch):
 
 
 def test_section_session_downloads_only_what_is_read(server, fresh_racefd, no_resolve):
-    """ffmpeg читает голову и отрезок — только эти куски и качаются."""
-    _RangeHandler.calls = 0
+    """ffmpeg читает голову и отрезок — только эти куски и качаются.
+    Читатель — объект, рвущий запись после n байт (как ffmpeg, который
+    дочитал своё): у сокета на localhost буферы в мегабайты, и тест по
+    настоящему соединению зависел бы от них."""
+    class Reader:
+        def __init__(self, n):
+            self.n, self.buf = n, b""
+
+        def write(self, data):
+            if len(self.buf) >= self.n:
+                raise BrokenPipeError
+            self.buf += data
+
     ydl = yt_dlp.YoutubeDL({"quiet": True, "no_warnings": True})
     fmt = {"url": server, "filesize": len(DATA), "http_headers": {}, "format_id": "137",
            "webpage_url": "https://www.youtube.com/watch?v=s"}
     sess = racefd.SectionSession(ydl, [fmt], est_total=None)
     try:
-        assert _get_range(sess.url(0), 0, 1000) == DATA[:1000]
+        d = sess.demands[0]
+        head = Reader(1000)
+        sess._stream(0, d, 0, len(DATA) - 1, head)
+        assert head.buf[:1000] == DATA[:1000]
         pos = 3 * racefd.CHUNK + 777
-        assert _get_range(sess.url(0), pos, 5000) == DATA[pos:pos + 5000]
+        clip = Reader(5000)
+        sess._stream(0, d, pos, len(DATA) - 1, clip)
+        assert clip.buf[:5000] == DATA[pos:pos + 5000]
         _time.sleep(0.3)
-        # Куски 0-1 (голова) и 3-4 (отрезок, с упреждением), но не весь файл:
+        # Голова (кусок 0) и отрезок (3, с упреждением 4), но не весь файл:
         # кусок 2 никому не был нужен.
-        assert 2 not in sess.demands[0].finished
-        assert sess.demands[0].served >= 6000
+        assert {0, 3} <= d.finished and 2 not in d.finished
+        assert d.served >= 6000
+        # Отдано через HTTP — то же самое.
+        assert _get_range(sess.url(0), pos, 5000) == DATA[pos:pos + 5000]
     finally:
         sess.close()
 
