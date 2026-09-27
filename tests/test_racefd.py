@@ -413,6 +413,38 @@ def test_section_session_downloads_only_what_is_read(server, fresh_racefd, no_re
         sess.close()
 
 
+def test_section_session_bounds_read_ahead_by_clip_size(server, fresh_racefd, no_resolve):
+    """Упреждение не раздувается за оценку конца отрезка: ffmpeg дочитает
+    и уйдёт, а заказанное впрок — лишние мегабайты (через egress — дорогие)."""
+    class Reader:
+        def __init__(self, n):
+            self.n, self.got = n, 0
+
+        def write(self, data):
+            if self.got >= self.n:
+                raise BrokenPipeError
+            self.got += len(data)
+
+    def run(clip_len):
+        ydl = yt_dlp.YoutubeDL({"quiet": True, "no_warnings": True})
+        fmt = {"url": server, "filesize": len(DATA), "http_headers": {}}
+        # Отрезок ≈ одна шестая файла (≈ кусок) либо без оценки.
+        sess = racefd.SectionSession(ydl, [fmt], est_total=None, clip_len=clip_len,
+                                     full_duration=600 if clip_len else None)
+        asked = set()
+        d = sess.demands[0]
+        orig = d.want
+        d.want = lambda cs: (asked.update(cs), orig(cs))
+        try:
+            sess._stream(0, d, 0, len(DATA) - 1, Reader(2 * racefd.CHUNK + 10))
+        finally:
+            sess.close()
+        return asked
+
+    assert max(run(None)) >= 5                  # без оценки — упреждение растёт
+    assert max(run(100)) <= 3                   # с оценкой — два куска за её краем
+
+
 def test_section_session_rejects_foreign_paths(server, fresh_racefd, no_resolve):
     import urllib.error
     import urllib.request
@@ -474,7 +506,8 @@ def test_section_session_reports_progress_and_stops_on_hook_error(server, fresh_
 def test_section_pp_rewrites_googlevideo_and_falls_back_on_hls(monkeypatch):
     """Дорожки для RaceFD — ссылки на локальный сервер; HLS — отрезок снят,
     ролик качается целиком (on_fallback)."""
-    monkeypatch.setattr(racefd, "SectionSession", lambda ydl, fmts, est, stop: _FakeSess(fmts, est))
+    monkeypatch.setattr(racefd, "SectionSession",
+                        lambda ydl, fmts, est, stop, **kw: _FakeSess(fmts, est))
     ydl = yt_dlp.YoutubeDL({"quiet": True})
     fell = []
     pp = racefd.SectionPP(ydl, 3600, on_fallback=lambda: fell.append(1))

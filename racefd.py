@@ -83,7 +83,9 @@ READ_TIMEOUT = 15        # полная тишина внутри ответа
 EGRESS_READ_TIMEOUT = 8  # через egress: подвисший туннель бросаем быстрее
 DEMAND_STALL = 2         # по запросу: нужный кусок не идёт столько, с — ищем другой сервер
 DEMAND_AHEAD = 24 << 20  # по запросу: упреждение, байт — всё сверх него на конце отрезка впустую
-DEMAND_DUP_AFTER = 1.0   # по запросу: кусок, которого ждёт ffmpeg, дублируем не сразу, с
+DEMAND_CLIP_SLACK = 1.3  # по запросу: запас к оценке размера отрезка (битрейт неровный)
+DEMAND_DUP_AFTER = 1.0   # по запросу: кусок, которого ждёт ffmpeg, дублируем, если по нему молчат столько, с
+DEMAND_DUP_AFTER_EGRESS = 3.0  # то же через egress: подключение через туннель само идёт 1-2 с
 MAX_FAILS = 5000         # подряд неудач у всех соединений -> ошибка; на деле решает сторож
                          # простоя менеджера (STALL_SEC): минутный провал пути до egress
                          # при 16 потоках набирал старые 400 неудач меньше чем за минуту
@@ -397,6 +399,7 @@ class RaceFD(FileDownloader):
         # Байты недокачанных кусков — для прогресса: на медленном соединении
         # кусок в 1 МиБ идёт десятки секунд, и без этого полоса стояла на нуле.
         partial: dict[int, int] = {}
+        touched: dict[int, float] = {}         # кусок -> когда по нему последний раз шли байты
         fails = [0]                 # неудач подряд (сбрасывается успехом)
         lock = threading.Lock()
         # Запись и закрытие файла — под одним замком: поток, который ещё
@@ -422,7 +425,9 @@ class RaceFD(FileDownloader):
         def next_wanted() -> int | None:
             """По запросу: самый ранний нужный кусок, за которым ещё никто
             не пошёл; все в работе — дублируем тот, что ждут дольше всех
-            (читатель стоит именно на нём), но не больше чем вдвоём."""
+            (читатель стоит именно на нём), но не больше чем вдвоём и только
+            если по нему молчат: медленный (через egress кусок идёт секунды),
+            но идущий кусок дубль не ускорит, а трафик удвоит."""
             with lock:
                 if demand.closed:
                     return None
@@ -432,9 +437,12 @@ class RaceFD(FileDownloader):
                     if c not in inflight:
                         demand.taken[c] = now
                         return c
-                if (left and inflight.get(left[0], 0) < 2
-                        and now - demand.taken.get(left[0], now) > DEMAND_DUP_AFTER):
-                    return left[0]
+                if left and inflight.get(left[0], 0) < 2:
+                    c = left[0]
+                    quiet_since = max(demand.taken.get(c, now), touched.get(c, 0.0))
+                    if now - quiet_since > (DEMAND_DUP_AFTER_EGRESS if egress_only
+                                            else DEMAND_DUP_AFTER):
+                        return c
             demand.wait(0.2)
             return -1
 
@@ -522,6 +530,7 @@ class RaceFD(FileDownloader):
                             with lock:
                                 if i not in finished:
                                     partial[i] = max(partial.get(i, 0), pos - start)
+                                    touched[i] = time.monotonic()
                         with lock:
                             fails[0] = 0
                             mr[1] += 1
@@ -870,7 +879,8 @@ class SectionSession:
     всеми своими обходами, в разреженный файл-подложку."""
 
     def __init__(self, ydl, formats: list[dict], est_total: int | None,
-                 should_stop=lambda: False) -> None:
+                 should_stop=lambda: False, clip_len: float | None = None,
+                 full_duration: float | None = None) -> None:
         import secrets
         import tempfile
         from http.server import ThreadingHTTPServer
@@ -882,6 +892,10 @@ class SectionSession:
         self.engines: list[threading.Thread] = []
         egress_only = bool(ydl.params.get("proxy")) and bool(config.EGRESS_POOL)
         self.ahead_max: list[int] = []
+        # Примерно сколько байт дорожки займёт отрезок: дальше этого от места,
+        # куда перемотал ffmpeg, упреждение не раздуваем — иначе на хвосте
+        # впустую качаются мегабайты (через egress — самые дорогие).
+        self.clip_bytes: list[int | None] = []
         # FFmpegFD передаёт ffmpeg прокси задачи через HTTP_PROXY; к нашему
         # серверу — только напрямую.
         np = os.environ.get("no_proxy", "")
@@ -899,6 +913,9 @@ class SectionSession:
             self.demands.append(d)
             self.ahead_max.append(max(2, min(_workers_for(size, egress_only),
                                              DEMAND_AHEAD // d.chunk)))
+            self.clip_bytes.append(
+                int(size * min(1.0, clip_len / full_duration))
+                if clip_len and full_duration else None)
             eng = RaceFD(ydl, ydl.params)
             t = threading.Thread(target=self._run_engine, args=(eng, f, d), daemon=True)
             self.engines.append(t)
@@ -992,12 +1009,18 @@ class SectionSession:
         по чуть-чуть и уходит — лишнего не качаем, а сам отрезок — подряд,
         на много соединений. Читатель ушёл — его куски больше не нужны."""
         last_chunk = b // d.chunk
+        # Где примерно кончится отрезок: битрейт неровный — с запасом.
+        cb = self.clip_bytes[n]
+        soft_end = ((a + int(cb * DEMAND_CLIP_SLACK)) // d.chunk + 1) if cb else last_chunk
         pos, ahead = a, 1
         mine: set[int] = set()
         try:
             while pos <= b:
                 c = pos // d.chunk
-                need = set(range(c, min(last_chunk, c + ahead - 1) + 1)) - mine
+                # За оценкой конца отрезка — только по два куска: ffmpeg
+                # вот-вот уйдёт, а если нет — всё равно дочитает.
+                span = ahead if c < soft_end else min(ahead, 2)
+                need = set(range(c, min(last_chunk, c + span - 1) + 1)) - mine
                 if need:
                     d.want(need)
                     mine |= need
@@ -1167,7 +1190,9 @@ class SectionPP:
                 est += int(size * min(1.0, clip_len / self.full_duration))
             elif f.get("tbr") and clip_len > 0:
                 est += int(f["tbr"] * 125 * clip_len)
-        self.session = SectionSession(self._ydl, fmts, est or None, self.should_stop)
+        self.session = SectionSession(self._ydl, fmts, est or None, self.should_stop,
+                                      clip_len=clip_len if end is not None else None,
+                                      full_duration=self.full_duration)
         reqs = info.get("requested_formats")
         if reqs:
             info["requested_formats"] = [
