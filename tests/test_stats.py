@@ -245,3 +245,35 @@ def test_error_kind_has_no_text():
     assert stats.error_kind("Этот сайт или тип ссылки не поддерживается.") == "unsupported"
     assert stats.error_kind("что-то странное") == "other"
     assert stats.error_kind(None) is None
+
+
+def test_feed_keeps_video_size_and_unknown_does_not_erase():
+    """Размер ролика в ленте: новый — пишется, неизвестный — не затирает."""
+    url = "https://size.example/v"
+    stats.record_download(url, size=123456789)
+    stats.record_download(url)
+    item = next(i for i in stats.feed() if i["url"] == url)
+    assert item["size"] == 123456789 and item["count"] == 2
+
+
+def test_feed_size_column_is_added_to_old_db(tmp_path, monkeypatch):
+    """Старая база без колонки size: init() её добавляет, записи на месте."""
+    import sqlite3
+    db = tmp_path / "old.sqlite3"
+    with sqlite3.connect(db) as c:
+        c.execute("CREATE TABLE feed (url TEXT PRIMARY KEY, first_seen TEXT NOT NULL, "
+                  "last_seen TEXT NOT NULL, count INTEGER NOT NULL DEFAULT 0)")
+        c.execute("INSERT INTO feed VALUES ('https://old.example/v', "
+                  "'2026-01-01T00:00:00+00:00', '2026-01-01T00:00:00+00:00', 3)")
+    monkeypatch.setattr(stats, "_DB_PATH", db)
+    monkeypatch.setattr(stats, "_conn", None)
+    try:
+        assert stats.init()
+        items = stats.feed()
+        assert items == [{"url": "https://old.example/v", "count": 3, "size": None,
+                          "first_seen": "2026-01-01T00:00:00+00:00",
+                          "last_seen": "2026-01-01T00:00:00+00:00"}]
+        stats.record_download("https://old.example/v", size=42)
+        assert stats.feed()[0]["size"] == 42
+    finally:
+        stats._conn.close()

@@ -188,3 +188,24 @@ def test_thumbnail_never_targets_webm():
     fmt, extra, _ = dl.build_format("audio", acodec="opus")
     _, e, _, _ = dl.apply_features(fmt, extra, {"embed_thumbnail": True}, "audio")
     assert "FFmpegVideoRemuxer" not in [pp["key"] for pp in e["postprocessors"]]
+
+
+def test_video_size_is_best_quality_not_users_choice():
+    """Размер ролика для ленты: лучшее разрешение (при равном — больший
+    битрейт) + лучший звук; без раздельных дорожек — лучший общий файл."""
+    import downloader as dl
+    info = {"duration": 100, "formats": [
+        {"format_id": "18", "vcodec": "avc1", "acodec": "mp4a", "height": 360, "filesize": 10},
+        {"format_id": "137", "vcodec": "avc1", "acodec": "none", "height": 1080, "tbr": 3000,
+         "filesize": 1000},
+        {"format_id": "248", "vcodec": "vp9", "acodec": "none", "height": 1080, "tbr": 2000,
+         "filesize": 700},
+        {"format_id": "140", "vcodec": "none", "acodec": "mp4a", "abr": 128, "filesize": 50},
+        {"format_id": "251", "vcodec": "none", "acodec": "opus", "abr": 160, "filesize": 60},
+        {"format_id": "sb0", "vcodec": "none", "acodec": "none"},
+    ]}
+    assert dl.video_size(info) == 1000 + 60
+    assert dl.video_size({"duration": 10, "formats": [
+        {"vcodec": "h264", "acodec": "aac", "height": 720, "tbr": 800}]}) == 800 * 125 * 10
+    assert dl.video_size({"formats": [{"vcodec": "none", "acodec": "mp3", "filesize": 5}]}) == 5
+    assert dl.video_size(None) is None and dl.video_size({"formats": []}) is None

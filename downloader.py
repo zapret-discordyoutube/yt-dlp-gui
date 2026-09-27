@@ -900,6 +900,9 @@ class Task:
     images_mode: bool = False    # скачать фото из поста-галереи (без видео)
     use_egress: bool = False     # качать через запасной egress-прокси (бан)
     clip: tuple | None = None    # (start,end) для пост-обрезки ffmpeg (YouTube)
+    # Размер ролика в лучшем качестве (из разбора) — для публичной ленты.
+    # Свойство ролика, а не выбора этого человека (формат, отрезок, MP3).
+    video_size: int | None = None
     playlist: int = 0            # >0 — плейлист архивом: сколько роликов качать
     status: str = "queued"       # queued|preparing|downloading|processing|finished|error|cancelled
     phase: str | None = None     # до первых байт: connect | bypass (для подписи в UI)
@@ -1105,6 +1108,8 @@ class DownloadManager:
                     fmt=fmt, extra=extra, label=label, thumbnail=thumbnail,
                     bundle=bundle, is_live=is_live, images_mode=images_mode,
                     use_egress=use_egress, clip=clip, playlist=playlist)
+        if not (images_mode or playlist or is_live):
+            task.video_size = video_size(cached_info(url, use_egress))
         with self.lock:
             if len(self.tasks) >= config.TASKS_MAX:
                 raise Overloaded("too_many_tasks")
@@ -1420,6 +1425,36 @@ class DownloadManager:
 
 # ---- файлы задачи на диске ----
 _PARTIAL_SUFFIXES = {".part", ".ytdl", ".temp"}
+
+
+def video_size(info: dict | None) -> int | None:
+    """Размер ролика в лучшем качестве — как «Примерный размер» на главной
+    при авто-качестве: самое высокое разрешение (при равном — больший
+    битрейт) плюс лучший звук; нет раздельных дорожек — лучший общий файл.
+    Размер — из разбора (filesize / filesize_approx / битрейт × длительность)."""
+    if not info:
+        return None
+    dur = info.get("duration") or 0
+
+    def size_of(f):
+        s = f.get("filesize") or f.get("filesize_approx")
+        if not s and f.get("tbr") and dur:
+            s = f["tbr"] * 125 * dur
+        return int(s) if s else 0
+    fmts = [f for f in info.get("formats") or [] if size_of(f)]
+    has_v = lambda f: (f.get("vcodec") or "none") != "none"
+    has_a = lambda f: (f.get("acodec") or "none") != "none"
+    video = [f for f in fmts if has_v(f)]
+    if not video:
+        audio = [f for f in fmts if has_a(f)]
+        return max(map(size_of, audio)) if audio else None
+    best = max(video, key=lambda f: (f.get("height") or 0, f.get("tbr") or 0))
+    total = size_of(best)
+    if not has_a(best):
+        audio = [f for f in fmts if has_a(f) and not has_v(f)]
+        if audio:
+            total += size_of(max(audio, key=lambda f: f.get("abr") or f.get("tbr") or 0))
+    return total or None
 
 
 def task_files(tid: str) -> list[Path]:

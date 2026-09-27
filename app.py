@@ -45,7 +45,7 @@ def _task_finished(task) -> None:
         stats.bump("downloads_done")
         # В ленту идёт приведённая ссылка: один ролик — одна запись,
         # и в публичную выдачу не попадают метки перехода и токены.
-        stats.record_download(dl.canonical_url(task.url))
+        stats.record_download(dl.canonical_url(task.url), size=task.video_size)
     elif task.status == "error":
         stats.bump("downloads_failed")
     # Производительность — по всем исходам, включая отмену: только домен и

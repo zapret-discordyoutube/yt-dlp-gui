@@ -132,8 +132,9 @@
   <section class="section">
     <div class="note">
       <span aria-hidden="true">🔒</span>
-      <span>О ленте выше: сервер хранит <strong>адрес ролика и время каждого скачивания</strong>
-      — и больше ничего. Ни названий, ни обложек, ни размеров, ни того, кто скачивал: ни IP,
+      <span>О ленте выше: сервер хранит <strong>адрес ролика, время каждого скачивания и
+      размер самого ролика</strong> (в лучшем качестве — а не того файла, что скачали вы)
+      — и больше ничего. Ни названий, ни обложек, ни выбранных форматов, ни того, кто скачивал: ни IP,
       ни сессии, ни учётных записей. Названия и картинки ваш браузер забирает напрямую с
       YouTube, сервер их не видит и не хранит. Сами видеофайлы не сохраняются — удаляются
       вскоре после выдачи. Времена скачиваний хранятся год, затем стираются.
@@ -498,7 +499,9 @@ function applyFeed(d) {
       <div class="feed-body">
         <a class="feed-title" href="${esc(url)}" target="_blank"
            rel="noopener noreferrer nofollow">${esc(url)}</a>
-        <div class="meta" title="Последний раз: ${esc(fullTime(it.last_seen))}&#10;Впервые: ${esc(fullTime(it.first_seen))}">${esc(host)}${
+        <div class="meta" title="Последний раз: ${esc(fullTime(it.last_seen))}&#10;Впервые: ${esc(fullTime(it.first_seen))}${
+          it.size ? "&#10;Размер ролика в лучшем качестве" : ""}">${esc(host)}${
+          it.size > 0 ? ` · ${esc(fmtBytes(it.size))}` : ""}${
           exactTime(it.last_seen) ? ` · <span class="meta__time">${esc(exactTime(it.last_seen))}</span>` : ""
         }${relTime(it.last_seen) ? ` · ${esc(relTime(it.last_seen))}` : ""}</div>
       </div>

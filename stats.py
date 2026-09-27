@@ -39,10 +39,12 @@ CREATE TABLE IF NOT EXISTS daily (
 );
 
 -- Публичная лента «что скачивают».
--- Сознательно храним ТОЛЬКО адрес, даты и счётчик: ни названия, ни обложки,
--- ни размера, ни выбранного формата. Название и картинку показывает браузер,
--- забирая их напрямую с источника. И, разумеется, никакой связи с тем,
--- КТО скачивал — ни IP, ни сессии.
+-- Сознательно храним ТОЛЬКО адрес, даты, счётчик и размер самого ролика (в
+-- лучшем качестве, из разбора — колонка size, добавлена миграцией): ни
+-- названия, ни обложки, ни выбранного формата, ни размера скачанного файла —
+-- по ним был бы виден выбор конкретного человека. Название и картинку
+-- показывает браузер, забирая их напрямую с источника. И, разумеется,
+-- никакой связи с тем, КТО скачивал — ни IP, ни сессии.
 CREATE TABLE IF NOT EXISTS feed (
     url        TEXT PRIMARY KEY,
     first_seen TEXT NOT NULL,
@@ -163,6 +165,8 @@ def _init_unsafe() -> bool:
         cols = {r[1] for r in conn.execute("PRAGMA table_info(perf)")}
         if "egress_bytes" not in cols:
             conn.execute("ALTER TABLE perf ADD COLUMN egress_bytes INTEGER")
+        if "size" not in {r[1] for r in conn.execute("PRAGMA table_info(feed)")}:
+            conn.execute("ALTER TABLE feed ADD COLUMN size INTEGER")
     return True
 
 
@@ -251,8 +255,10 @@ def bump(counter: str, amount: int = 1) -> None:
         pass
 
 
-def record_download(url: str) -> None:
-    """Отметить факт скачивания ролика. Сохраняем адрес, дату и счётчик."""
+def record_download(url: str, size: int | None = None) -> None:
+    """Отметить факт скачивания ролика. Сохраняем адрес, дату, счётчик и
+    размер самого ролика (не скачанного файла — см. схему feed); неизвестный
+    размер прежний не затирает."""
     if not config.FEED_ENABLED or not url:
         return
     # Точность до микросекунд, а не до секунды: иначе записи, сделанные в
@@ -262,11 +268,12 @@ def record_download(url: str) -> None:
     try:
         with _lock, _connect() as conn:
             conn.execute(
-                "INSERT INTO feed(url, first_seen, last_seen, count) "
-                "VALUES (?, ?, ?, 1) "
+                "INSERT INTO feed(url, first_seen, last_seen, count, size) "
+                "VALUES (?, ?, ?, 1, ?) "
                 "ON CONFLICT(url) DO UPDATE SET "
-                "  last_seen = excluded.last_seen, count = count + 1",
-                (url, now, now))
+                "  last_seen = excluded.last_seen, count = count + 1, "
+                "  size = COALESCE(excluded.size, size)",
+                (url, now, now, int(size) if size else None))
             # До минуты: см. пояснение в заголовке модуля.
             conn.execute("INSERT INTO events(url, at) VALUES (?, ?)",
                          (url, now[:16] + ":00+00:00"))
@@ -448,14 +455,14 @@ def migrate_feed(canonicalize) -> int:
     try:
         with _lock, _connect() as conn:
             rows = conn.execute(
-                "SELECT url, first_seen, last_seen, count FROM feed").fetchall()
+                "SELECT url, first_seen, last_seen, count, size FROM feed").fetchall()
             # Любое исключение из canonicalize (а не только sqlite3.Error)
             # раньше летело наружу из импорта app и не давало сервису
             # стартовать: canonical_url ловит лишь ValueError, а на
             # одиночном суррогате бросает UnicodeEncodeError.
             merged: dict[str, list] = {}
             changed = False
-            for url, first, last, cnt in rows:
+            for url, first, last, cnt, size in rows:
                 key = canonicalize(url)
                 if key != url:
                     changed = True
@@ -464,15 +471,16 @@ def migrate_feed(canonicalize) -> int:
                     m[0] = min(m[0], first)
                     m[1] = max(m[1], last)
                     m[2] += cnt
+                    m[3] = m[3] or size
                 else:
-                    merged[key] = [first, last, cnt]
+                    merged[key] = [first, last, cnt, size]
             if not changed:
                 return 0
             conn.execute("DELETE FROM feed")
             conn.executemany(
-                "INSERT INTO feed(url, first_seen, last_seen, count) "
-                "VALUES (?, ?, ?, ?)",
-                [(u, v[0], v[1], v[2]) for u, v in merged.items()])
+                "INSERT INTO feed(url, first_seen, last_seen, count, size) "
+                "VALUES (?, ?, ?, ?, ?)",
+                [(u, v[0], v[1], v[2], v[3]) for u, v in merged.items()])
             # События хранятся по тому же адресу: без переноса вся
             # собранная история оставалась осиротевшей и невидимой.
             for old_url in {r[0] for r in rows}:
@@ -535,10 +543,10 @@ def feed(order: str = "recent", limit: int = 50,
     try:
         with _lock, _connect() as conn:
             rows = conn.execute(
-                f"SELECT url, first_seen, last_seen, count FROM feed "
+                f"SELECT url, first_seen, last_seen, count, size FROM feed "
                 f"{where}ORDER BY {col} LIMIT ?", (*args, limit)).fetchall()
-        return [{"url": r[0], "first_seen": r[1], "last_seen": r[2], "count": r[3]}
-                for r in rows]
+        return [{"url": r[0], "first_seen": r[1], "last_seen": r[2], "count": r[3],
+                 "size": r[4]} for r in rows]
     except sqlite3.Error:
         return []
 

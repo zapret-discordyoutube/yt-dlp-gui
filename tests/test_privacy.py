@@ -60,7 +60,8 @@ def test_feed_receives_canonical_url(monkeypatch):
     """Сырая ссылка с токенами не должна попадать в публичную ленту."""
     import app as app_module
     seen = []
-    monkeypatch.setattr(app_module.stats, "record_download", seen.append)
+    monkeypatch.setattr(app_module.stats, "record_download",
+                        lambda url, size=None: seen.append(url))
     monkeypatch.setattr(app_module.stats, "bump", lambda *a, **k: None)
     monkeypatch.setattr(app_module.stats, "record_perf", lambda *a, **k: None)
 
