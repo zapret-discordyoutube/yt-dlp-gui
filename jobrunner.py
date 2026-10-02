@@ -40,8 +40,9 @@ import config
 import downloader as dl
 import racefd
 
-# Порядок форматов YouTube: сначала разрешение и fps, затем https вместо HLS.
-YT_FORMAT_SORT = ("res", "fps", "hdr:12", "proto:https")
+# Порядок форматов YouTube — общий с разбором (downloader.YT_FORMAT_SORT):
+# по нему же интерфейс показывает, что выберет «Авто».
+YT_FORMAT_SORT = dl.YT_FORMAT_SORT
 
 # Как часто отправлять прогресс. Хук yt-dlp вызывается на каждый блок
 # данных — сотни раз в секунду; родителю столько не нужно.
@@ -320,6 +321,8 @@ class Job:
         # yt-dlp выбирал их, а фрагменты HLS идут штатным загрузчиком без
         # смены сервера — и висли на заблокированном видеосервере. Для
         # https-форматов работает racefd. Разрешение при этом не теряется.
+        # Остальной порядок («лучшее» = битрейт видео, SDR) — см.
+        # downloader.YT_FORMAT_SORT.
         if dl.is_youtube(self.url):
             opts["format_sort"] = list(YT_FORMAT_SORT)
         if self.playlist:

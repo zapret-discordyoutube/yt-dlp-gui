@@ -250,6 +250,18 @@ def api_download():
         return err(message_for(e, "Плохая ссылка"))
 
     images_mode = str(data.get("kind")) == "image"
+    # Отрезок «с X по Y» — до выбора формата: к отрезку лимит размера при
+    # выборе не применяется (от длинного 4K нужен кусок, а не 1080p).
+    clip = None
+    if not images_mode:
+        try:
+            clip = dl.parse_clip(
+                str(data.get("clip_from", "")), str(data.get("clip_to", "")))
+        except ValueError:
+            return err("Неверный отрезок: конец должен быть больше начала")
+    # Разбор из «Проверить» (тем же путём): ориентация и длительность — для
+    # «1080p» у вертикальных роликов и для лимита размера.
+    probed = dl.cached_info(url, bool(data.get("via_egress"))) or {}
     try:
         if images_mode:
             # Пост-галерея: формат не выбираем, картинки берёт сам воркер.
@@ -265,6 +277,9 @@ def api_download():
                 vcodec=str(data.get("vcodec", "auto")),
                 vaudio=str(data.get("vaudio", "auto")),
                 alang=str(data.get("alang", "")),
+                portrait=dl.is_portrait(probed),
+                duration=probed.get("duration"),
+                size_cap=not clip and not data.get("is_live"),
             )
     except ValueError as e:
         return err(message_for(e, "Неверный выбор формата"))
@@ -285,12 +300,6 @@ def api_download():
         fmt, extra, feat_label, bundle = dl.apply_features(fmt, extra, features, kind_for_feat)
         if feat_label:
             label = f"{label} · {feat_label}"
-        # Отрезок «с X по Y».
-        try:
-            clip = dl.parse_clip(
-                str(data.get("clip_from", "")), str(data.get("clip_to", "")))
-        except ValueError:
-            return err("Неверный отрезок: конец должен быть больше начала")
         if clip:
             label = f"{label} · ✂ {dl.clip_label(*clip)}"
             # Как резать, решает исполнитель: везде — частичная загрузка

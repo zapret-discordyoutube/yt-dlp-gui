@@ -25,12 +25,13 @@ def test_video_selector_exact():
     sel, extra, label = dl.build_format("video", height="1080",
                                         vcodec="h264", vaudio="aac")
     assert sel == (
-        "bestvideo[height<=?1080][vcodec~='(?i:^(avc1|h264))']"
-        "+bestaudio[acodec~='(?i:^mp4a)']"
-        "/bestvideo[height<=?1080][vcodec~='(?i:^(avc1|h264))']+bestaudio"
+        # bv*, а не bestvideo: лучшим бывает готовый файл со звуком
+        "bv*[height<=?1080][vcodec~='(?i:^(avc1|h264))']"
+        "+ba[acodec~='(?i:^mp4a)']"
+        "/bv*[height<=?1080][vcodec~='(?i:^(avc1|h264))']+ba"
         # ступень без фильтра кодека: без неё на сайтах с раздельными
         # дорожками выбор проваливался мимо склейки к муксованному 360p
-        "/bestvideo[height<=?1080]+bestaudio"
+        "/bv*[height<=?1080]+ba"
         "/best[height<=?1080][vcodec~='(?i:^(avc1|h264))']"
         "/best[height<=?1080]"
         # замыкающий вариант обязан уважать ограничение высоты
@@ -209,3 +210,105 @@ def test_video_size_is_best_quality_not_users_choice():
         {"vcodec": "h264", "acodec": "aac", "height": 720, "tbr": 800}]}) == 800 * 125 * 10
     assert dl.video_size({"formats": [{"vcodec": "none", "acodec": "mp3", "filesize": 5}]}) == 5
     assert dl.video_size(None) is None and dl.video_size({"formats": []}) is None
+
+
+# --- «Авто» = лучшее из лучших ----------------------------------------------
+# Форматы — как у YouTube: на одном разрешении AV1 с самым урезанным
+# битрейтом, H.264/VP9 щедрее; звук — оригинал, дубляж и DRC.
+
+def _yt_formats(scale: float = 1.0, portrait: bool = False):
+    def v(fid, vcodec, h, vbr, fps=30, dr="SDR"):
+        w = h * 16 // 9
+        if portrait:
+            w, h = h, w
+        return {"format_id": fid, "url": f"https://r1.googlevideo.com/{fid}",
+                "protocol": "https", "ext": "mp4", "vcodec": vcodec, "acodec": "none",
+                "width": w, "height": h, "fps": fps, "dynamic_range": dr,
+                "vbr": vbr, "tbr": vbr, "filesize": int(vbr * 125 * 600 * scale)}
+
+    def a(fid, acodec, abr, lang="en", pref=10, quality=3, note=""):
+        return {"format_id": fid, "url": f"https://r1.googlevideo.com/{fid}",
+                "protocol": "https", "ext": "webm", "vcodec": "none", "acodec": acodec,
+                "abr": abr, "tbr": abr, "language": lang, "language_preference": pref,
+                "quality": quality, "format_note": note,
+                "filesize": int(abr * 125 * 600 * scale)}
+    return [
+        v("401", "av01.0.12M.08", 2160, 10466), v("313", "vp9", 2160, 16241),
+        v("701", "av01.0.13M.10", 2160, 24632, dr="HDR10"),
+        v("399", "av01.0.08M.08", 1080, 747), v("248", "vp9", 1080, 900),
+        v("137", "avc1.640028", 1080, 1443),
+        a("251", "opus", 124, note="original"), a("140", "mp4a.40.2", 129),
+        a("251-20", "opus", 160, lang="ml", pref=-1),
+        a("251-drc", "opus", 140, quality=2.5),
+    ]
+
+
+def _yt_info(**kw):
+    return {"id": "x", "duration": 600 * kw.pop("dur_scale", 1),
+            "formats": _yt_formats(**kw)}
+
+
+YT = "https://www.youtube.com/watch?v=x"
+
+
+def test_auto_takes_highest_video_bitrate_not_av1():
+    """AV1 у YouTube урезан по битрейту: «Авто» берёт самую плотную дорожку
+    разрешения (4K — VP9, 1080p — H.264), SDR вместо HDR, звук — оригинал
+    Opus, не дубляж и не DRC."""
+    picks = dl.preview_picks(_yt_info(), YT, ["2160", "1080"])
+    assert (picks["auto"]["res"], picks["auto"]["vcodec"], picks["auto"]["hdr"]) == (2160, "vp9", False)
+    assert picks["1080"]["vcodec"] == "avc1"
+    assert "capped" not in picks["auto"]
+
+
+def test_auto_audio_stays_original_track():
+    info = _yt_info()
+    ydl = yt_dlp.YoutubeDL({"quiet": True, "format_sort": list(dl.YT_FORMAT_SORT)})
+    ydl.sort_formats(info)
+    sel, _, _ = dl.build_format("video")
+    chosen = next(iter(ydl.build_format_selector(sel)({
+        "formats": info["formats"], "has_merged_format": False,
+        "incomplete_formats": False})))
+    assert [f["format_id"] for f in chosen["requested_formats"]] == ["313", "251"]
+
+
+def test_auto_falls_back_to_what_fits_the_size_limit():
+    """Лучшее не влезает в MAX_FILESIZE_MB — «Авто» берёт лучшее из того, что
+    влезает (а не падает, скачав 2 ГБ), и отмечает это для интерфейса."""
+    # 600 с × 8: 4K VP9 ≈ 9,7 ГБ, 4K AV1 ≈ 6,3 ГБ, 1080p H.264 ≈ 0,87 ГБ
+    picks = dl.preview_picks(_yt_info(scale=8, dur_scale=8), YT, ["2160", "1080"])
+    assert (picks["auto"]["res"], picks["auto"]["vcodec"]) == (1080, "avc1")
+    assert picks["auto"]["capped"] is True
+
+
+def test_size_cap_cascade_ends_without_cap():
+    """Если не влезает ничего — каскад продолжается без ограничения размера,
+    и понятную ошибку отдаёт сторож размера исполнителя."""
+    sel, _, _ = dl.build_format("video", duration=600, size_cap=True)
+    first, *_, = sel.split("/")
+    assert "[filesize<?" in first and "[tbr<?" in first
+    assert "bv*+ba" in sel.split("/") and sel.endswith("/best")
+    assert compiles(sel)
+    # Без длительности — запас под звук на максимальную длину, без tbr.
+    sel, _, _ = dl.build_format("video", size_cap=True)
+    assert "[filesize<?" in sel and "[tbr<?" not in sel
+
+
+def test_portrait_height_means_short_side():
+    """Shorts 1080x1920 на «1080p» урезался до 480x854: фильтр смотрел на
+    высоту 1920. Для вертикальных роликов ограничение — по ширине."""
+    sel, _, _ = dl.build_format("video", height="1080", portrait=True)
+    assert "[width<=?1080]" in sel and "[height<=" not in sel
+    info = _yt_info(portrait=True)
+    assert dl.is_portrait(info)
+    picks = dl.preview_picks(info, YT, ["1080"])
+    assert picks["1080"]["res"] == 1080
+
+
+def test_feed_video_size_matches_auto_pick():
+    """Лента «что скачивают» показывает размер ровно того, что выберет «Авто»
+    (а не «самый большой 4K» по своей оценке)."""
+    info = _yt_info()
+    assert dl.video_size(info, YT) == dl.preview_picks(info, YT, [])["auto"]["size"]
+    # 4K VP9 313 (16241 кбит/с) + оригинальный Opus 251 (124 кбит/с), 600 с
+    assert dl.video_size(info, YT) == int(16241 * 125 * 600) + int(124 * 125 * 600)

@@ -69,15 +69,66 @@ _VIDEO_AUDIO = {
 }
 
 
+# YouTube: что считать «лучшим» (format_sort для yt-dlp; ставит исполнитель,
+# по нему же probe показывает, что выберет «Авто»). Поля пользователя идут
+# раньше дефолтных yt-dlp, где первым по кодеку стоит AV1, а YouTube отдаёт
+# AV1 с самым урезанным битрейтом: 1080p — 0,75 Мбит/с против 1,44 у H.264,
+# 4K — 10,5 против 16,2 у VP9. Поэтому при равных разрешении и fps решает
+# битрейт ВИДЕО, а не имя кодека.
+#  * hdr:sdr — SDR выше HDR того же разрешения: HDR10 на обычном экране и в
+#    Telegram выглядит блёклым, а SDR-вариант есть почти всегда с тем же
+#    битрейтом. Ролик только в HDR всё равно берётся в HDR.
+#  * proto:https — премиальные HLS-форматы (616) идут штатным загрузчиком
+#    без racefd и висли на заблокированных видеосерверах.
+#  * vbr, а не br/tbr/size: у звука vbr нет (0), и он по-прежнему выбирается
+#    дефолтом (lang, quality, acodec) — с br выбирался дубляж или DRC-дорожка
+#    вместо оригинала. lang и quality — до vbr по той же причине.
+YT_FORMAT_SORT = ("res", "fps", "hdr:sdr", "proto:https", "lang", "quality", "vbr")
+
+# Запас под звук при отборе видео по размеру: Opus/AAC YouTube — до ~160
+# кбит/с, с запасом. Лимит размера — на файл целиком, а фильтры yt-dlp
+# видят дорожки по отдельности.
+_AUDIO_RESERVE_KBPS = 192
+
+
+def size_filter(duration: float | None) -> str:
+    """Фильтр видеодорожки «влезет в MAX_FILESIZE_MB вместе со звуком».
+
+    Без него «Авто» брало 4K и на ролике длиннее ~12 минут падало, скачав
+    2 ГБ: max_filesize yt-dlp смотрит каждую дорожку отдельно, а racefd его
+    не читает вовсе — срабатывал только сторож размера в исполнителе.
+    Размер у формата бывает точным (filesize), примерным (filesize_approx)
+    или только битрейтом (tbr — HLS), поэтому ограничиваем все три; '?' —
+    формат без этих данных не выбрасывается. Длительность неизвестна — запас
+    под звук на максимальную длину ролика, без фильтра по битрейту.
+    """
+    limit = config.MAX_FILESIZE_MB * 1024 * 1024
+    audio = (duration or config.MAX_DURATION_SEC) * _AUDIO_RESERVE_KBPS * 125
+    cap = int((limit - audio) * 0.97)
+    if cap <= 0:
+        return ""
+    f = f"[filesize<?{cap}][filesize_approx<?{cap}]"
+    if duration:
+        f += f"[tbr<?{int(cap / 125 / duration)}]"
+    return f
+
+
 def build_format(kind: str, height: str = "auto", acodec: str = "best",
                  vcodec: str = "auto", vaudio: str = "auto",
-                 alang: str = "") -> tuple[str, dict, str]:
+                 alang: str = "", portrait: bool = False,
+                 duration: float | None = None,
+                 size_cap: bool = False) -> tuple[str, dict, str]:
     """Возвращает (format_selector, extra_opts, label) по безопасному выбору.
 
     kind='audio': acodec in {best,mp3,aac,opus}
     kind='video': height in {auto,2160..360}, vcodec in {auto,h264,av1,vp9},
                   vaudio in {auto,aac,opus}
     alang: код языка аудиодорожки (дубляж), напр. 'ru'; '' = как в источнике.
+    portrait: вертикальное видео — «1080p» относится к короткой стороне,
+              то есть к ширине (иначе Shorts 1080x1920 на «1080p» урезался
+              до 480x854).
+    size_cap: сначала искать видео, влезающее в лимит размера (size_filter
+              по duration); не влезло ничего — каскад без ограничения.
     """
     alang = (alang or "").strip()
     if alang and not _LANG_RE.fullmatch(alang):
@@ -124,11 +175,28 @@ def build_format(kind: str, height: str = "auto", acodec: str = "best",
         elif height in _HEIGHTS:
             # '?' после оператора обязателен: иначе форматы, у которых height
             # неизвестен (None), молча выбрасываются из выборки.
-            hfilter, hlabel = f"[height<=?{height}]", f"{height}p"
+            side = "width" if portrait else "height"
+            hfilter, hlabel = f"[{side}<=?{height}]", f"{height}p"
         else:
             raise ValueError("unknown_height")
 
-        v = f"bestvideo{hfilter}{vfilter}"
+        def steps(sf: str) -> list[str | None]:
+            # bv*, а не bestvideo: bestvideo видит только дорожки без звука и
+            # на сайтах, где лучшее — готовый файл со звуком (муксованный
+            # 1080p при раздельных 720p), брал худшее. Если bv* выбрал файл
+            # со звуком, yt-dlp отбрасывает лишнюю звуковую дорожку сам.
+            v = f"bv*{hfilter}{vfilter}{sf}"
+            return [
+                # Сначала выбранный язык (+ кодек), затем язык без кодека, затем
+                # дорожка как в источнике, затем общие послабления.
+                f"{v}+ba{lang_f}{afilter}" if (lang_f or afilter) else None,
+                f"{v}+ba{lang_f}" if lang_f else None,
+                f"{v}+ba",
+                f"bv*{hfilter}{sf}+ba" if vfilter else None,
+                f"best{hfilter}{vfilter}{sf}" if vfilter else None,
+                f"best{hfilter}{sf}",
+            ]
+
         # Каскад запасных вариантов: от точного совпадения к послаблениям.
         # Важны две ступени, которых не хватало:
         #  * «снять фильтр кодека, но оставить склейку» — без неё на сайтах
@@ -138,17 +206,16 @@ def build_format(kind: str, height: str = "auto", acodec: str = "best",
         #  * замыкающий вариант обязан уважать ограничение высоты: прежний
         #    голый `best` отдавал 1080p на запрос 360p, то есть кратно
         #    больше трафика и диска, чем просили.
-        sel = "/".join(filter(None, [
-            # Сначала выбранный язык (+ кодек), затем язык без кодека, затем
-            # дорожка как в источнике, затем общие послабления.
-            f"{v}+bestaudio{lang_f}{afilter}" if (lang_f or afilter) else None,
-            f"{v}+bestaudio{lang_f}" if lang_f else None,
-            f"{v}+bestaudio",
-            f"bestvideo{hfilter}+bestaudio" if vfilter else None,
-            f"best{hfilter}{vfilter}" if vfilter else None,
-            f"best{hfilter}",
+        # С лимитом размера каскад проходится дважды: сначала только то, что
+        # влезает (сортировка по разрешению берёт самое высокое из таких),
+        # затем без ограничения — не влезло ничего, и сторож размера в
+        # исполнителе отдаст понятную ошибку.
+        sf = size_filter(duration) if size_cap else ""
+        sel = "/".join(dict.fromkeys(filter(None, [
+            *(steps(sf) if sf else []),
+            *steps(""),
             "worst" if hfilter else "best",
-        ]))
+        ])))
         parts = [hlabel, vlabel] + ([alabel] if vaudio != "auto" else [])
         if alang:
             parts.append(alang)
@@ -771,14 +838,16 @@ def probe(url: str) -> dict:
     all_formats = ([f for e in video_entries for f in e["formats"]] if multi
                    else info.get("formats") or [])
 
-    # доступные высоты видео -> для простого селектора качества
+    # доступные высоты видео -> для простого селектора качества. «Высота» —
+    # короткая сторона: у вертикального 1080x1920 это 1080, а не 1920 (иначе
+    # в списке у Shorts не оставалось почти ничего).
     heights = set()
     for f in all_formats:
-        h = f.get("height")
+        h = short_side(f)
         # None = кодек неизвестен, но видео у формата есть; отбрасываем
         # только явное "none" (см. пояснение ниже про два разных значения).
         if h and f.get("vcodec") != "none":
-            heights.add(int(h))
+            heights.add(h)
     avail = [str(h) for h in sorted(heights, reverse=True) if str(h) in _HEIGHTS]
 
     # полный список форматов -> продвинутый режим «всё что есть»
@@ -802,6 +871,7 @@ def probe(url: str) -> dict:
             "kind": kind,
             "ext": f.get("ext"),
             "height": f.get("height"),
+            "width": f.get("width"),
             "fps": f.get("fps"),
             "resolution": f.get("resolution") or (
                 f"{f.get('width')}x{f.get('height')}" if f.get("height") else None),
@@ -865,6 +935,9 @@ def probe(url: str) -> dict:
         "webpage_url": info.get("webpage_url") or url,
         "extractor": info.get("extractor_key") or info.get("extractor"),
         "heights": avail,
+        # Что выберет сервер на «Авто» и на каждую высоту (подпись и размер
+        # в интерфейсе — по ним, а не по своей оценке).
+        "picks": preview_picks(info, url, avail) if info.get("formats") and not is_live else {},
         "is_live": is_live,
         "is_gallery": is_gallery,
         "image_count": len(images),
@@ -1109,7 +1182,7 @@ class DownloadManager:
                     bundle=bundle, is_live=is_live, images_mode=images_mode,
                     use_egress=use_egress, clip=clip, playlist=playlist)
         if not (images_mode or playlist or is_live):
-            task.video_size = video_size(cached_info(url, use_egress))
+            task.video_size = video_size(cached_info(url, use_egress), url)
         with self.lock:
             if len(self.tasks) >= config.TASKS_MAX:
                 raise Overloaded("too_many_tasks")
@@ -1427,13 +1500,19 @@ class DownloadManager:
 _PARTIAL_SUFFIXES = {".part", ".ytdl", ".temp"}
 
 
-def video_size(info: dict | None) -> int | None:
+def video_size(info: dict | None, url: str = "") -> int | None:
     """Размер ролика в лучшем качестве — как «Примерный размер» на главной
-    при авто-качестве: самое высокое разрешение (при равном — больший
-    битрейт) плюс лучший звук; нет раздельных дорожек — лучший общий файл.
-    Размер — из разбора (filesize / filesize_approx / битрейт × длительность)."""
+    при авто-качестве. Со ссылкой — ровно выбор «Авто» (preview_picks: та же
+    сортировка и лимит размера); без неё или если подсказка не построилась —
+    самое высокое разрешение (при равном — больший битрейт) плюс лучший звук;
+    нет раздельных дорожек — лучший общий файл. Размер — из разбора
+    (filesize / filesize_approx / битрейт × длительность)."""
     if not info:
         return None
+    if url and info.get("formats"):
+        auto = preview_picks(info, url, []).get("auto") or {}
+        if auto.get("size"):
+            return auto["size"]
     dur = info.get("duration") or 0
 
     def size_of(f):
@@ -1455,6 +1534,100 @@ def video_size(info: dict | None) -> int | None:
         if audio:
             total += size_of(max(audio, key=lambda f: f.get("abr") or f.get("tbr") or 0))
     return total or None
+
+
+def short_side(f: dict) -> int | None:
+    """«Высота» в смысле 1080p — короткая сторона кадра (как поле res в
+    сортировке yt-dlp): у вертикального 1080x1920 это 1080."""
+    w, h = f.get("width"), f.get("height")
+    if w and h:
+        return int(min(w, h))
+    return int(h) if h else None
+
+
+def is_portrait(info: dict | None) -> bool:
+    """Вертикальный ролик: у большинства видеоформатов ширина меньше высоты."""
+    vs = [f for f in (info or {}).get("formats") or []
+          if f.get("width") and f.get("height") and f.get("vcodec") != "none"]
+    return bool(vs) and 2 * sum(f["width"] < f["height"] for f in vs) > len(vs)
+
+
+def format_sort_for(url: str) -> list[str]:
+    """format_sort исполнителя: свой порядок для YouTube, дефолт yt-dlp — для
+    остальных сайтов."""
+    return list(YT_FORMAT_SORT) if is_youtube(url) else []
+
+
+def preview_picks(info: dict, url: str, heights: list[str]) -> dict:
+    """Подсказка для интерфейса — её сбой не должен ронять разбор ссылки."""
+    try:
+        return _preview_picks(info, url, heights)
+    except Exception:                         # noqa: BLE001
+        logging.warning("подсказка выбора формата не построилась", exc_info=True)
+        return {}
+
+
+def _preview_picks(info: dict, url: str, heights: list[str]) -> dict:
+    """Что сервер выберет на «Авто» и на каждую высоту при кодеках «Любой» —
+    тем же селектором (build_format, с лимитом размера) и той же сортировкой,
+    что у исполнителя. Интерфейс показывает по этому подпись и размер; раньше
+    он считал «лучшее» сам, по высоте и tbr, и расходился с сервером.
+
+    {"auto": {...}, "1080": {...}, ...}; у «auto» ещё capped=True, если лучшее
+    не влезло в лимит размера и выбрано разрешение ниже. Нет форматов — {}."""
+    fmts = list(info.get("formats") or [])
+    if not fmts:
+        return {}
+    dur = info.get("duration")
+    portrait = is_portrait(info)
+    ydl = yt_dlp.YoutubeDL({"quiet": True, "logger": _QuietLogger(),
+                            "format_sort": format_sort_for(url)})
+    ydl.sort_formats({"formats": fmts,
+                      "_format_sort_fields": info.get("_format_sort_fields")})
+    ctx = {
+        "formats": fmts,
+        "has_merged_format": any("none" not in (f.get("acodec"), f.get("vcodec"))
+                                 for f in fmts),
+        "incomplete_formats": (all(f.get("vcodec") == "none" for f in fmts)
+                               or all(f.get("acodec") == "none" for f in fmts)),
+    }
+
+    def size_of(f):
+        s = f.get("filesize") or f.get("filesize_approx")
+        if not s and f.get("tbr") and dur:
+            s = f["tbr"] * 125 * dur
+        return int(s) if s else 0
+
+    def pick(height: str, cap: bool) -> dict | None:
+        sel, _, _ = build_format("video", height=height, portrait=portrait,
+                                 duration=dur, size_cap=cap)
+        try:
+            chosen = next(iter(ydl.build_format_selector(sel)(dict(ctx))), None)
+        except Exception:                     # noqa: BLE001 — подсказка, не загрузка
+            return None
+        if not chosen:
+            return None
+        parts = chosen.get("requested_formats") or [chosen]
+        v = next((p for p in parts if p.get("vcodec") != "none"), parts[0])
+        vc = v.get("vcodec")
+        sizes = [size_of(p) for p in parts]
+        return {
+            "res": short_side(v),
+            "fps": round(v["fps"]) if v.get("fps") else None,
+            "vcodec": vc.split(".")[0] if vc and vc != "none" else None,
+            "hdr": (v.get("dynamic_range") or "SDR") != "SDR",
+            "size": sum(sizes) if all(sizes) else None,
+        }
+
+    out = {}
+    for h in ["auto", *heights]:
+        p = pick(h, cap=True)
+        if p:
+            out[h] = p
+    best = pick("auto", cap=False)
+    if "auto" in out and best and (best["res"] or 0) > (out["auto"]["res"] or 0):
+        out["auto"]["capped"] = True
+    return out
 
 
 def task_files(tid: str) -> list[Path]:

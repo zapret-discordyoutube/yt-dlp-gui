@@ -605,13 +605,24 @@ function renderPreview(d) {
 
   // качество
   const sel = $("#sel-height");
-  sel.innerHTML = '<option value="auto">Авто (лучшее)</option>';
+  // «Авто» — с тем, что сервер на нём выберет (d.picks — тем же селектором
+  // и сортировкой, что у загрузки).
+  const ap = (d.picks || {}).auto;
+  sel.innerHTML = "";
+  const ao = document.createElement("option");
+  ao.value = "auto";
+  ao.textContent = ap && ap.res ? `Авто (лучшее · ${pickLabel(ap)})` : "Авто (лучшее)";
+  sel.appendChild(ao);
   (d.heights || []).forEach(h => {
     const o = document.createElement("option");
     o.value = h; o.textContent = `${h}p`;
     sel.appendChild(o);
   });
-  sel.value = (d.heights || []).includes(settings.height) ? settings.height : "auto";
+  // Качество не переносится на следующий ролик: каждый начинается с «Авто».
+  // Раньше прошлый выбор (1080p) молча подставлялся, а если такой высоты у
+  // ролика не было, на экране было «Авто», а на сервер уходила старая высота.
+  sel.value = "auto";
+  if (settings.height !== "auto") { settings.height = "auto"; saveSettings(); }
   $("#sel-vcodec").value = settings.vcodec;
   $("#sel-vaudio").value = settings.vaudio;
   $("#sel-acodec").value = settings.acodec;
@@ -709,7 +720,17 @@ function renderFormats(formats) {
 
 /* Примерный размер выбранного варианта — оценка из данных probe (filesize
    или битрейт × длительность). Не точная, но даёт понять порядок. */
+/* Подпись выбора сервера: «2160p60 · VP9 · HDR». */
+const VCODEC_NAMES = { avc1: "H.264", h264: "H.264", av01: "AV1", vp9: "VP9", vp09: "VP9" };
+function pickLabel(p) {
+  return [p.res ? `${p.res}p${p.fps && p.fps > 30 ? p.fps : ""}` : null,
+          p.vcodec ? (VCODEC_NAMES[p.vcodec.toLowerCase()] || p.vcodec) : null,
+          p.hdr ? "HDR" : null].filter(Boolean).join(" · ");
+}
+const LIMIT_BYTES = {{ limits.max_filesize_mb }} * 1024 * 1024;
+
 function updateSizeEst() {
+  let what = "";
   const el = $("#size-est");
   const box = $("#size-box");
   const fs = current && current.formats;
@@ -726,18 +747,33 @@ function updateSizeEst() {
     const f = picked && fs.find(x => x.format_id === picked.value);
     total = f ? bytesOf(f) : 0;
   } else {
-    const h = settings.height === "auto" ? Infinity : parseInt(settings.height);
-    const v = fs.filter(f => (f.kind === "video" || f.kind === "both") && (f.height || 0) <= h)
-      .sort((a, b) => ((b.height || 0) - (a.height || 0)) || ((b.tbr || 0) - (a.tbr || 0)))[0];
-    if (v) {
-      total = bytesOf(v);
-      if (v.kind === "video") { const a = bestAudio(); if (a) total += bytesOf(a); }
+    // Кодеки «Любой» — ровно то, что выберет сервер (current.picks). С отрезком
+    // лимит размера при выборе не действует — берём выбор без него только
+    // для «Авто», где сервер это и отмечает (capped).
+    const p = settings.vcodec === "auto" && settings.vaudio === "auto"
+      && (current.picks || {})[settings.height];
+    const clipped = clipFraction() < 1;
+    if (p && p.size && !(clipped && p.capped)) {
+      total = p.size;
+      what = pickLabel(p) + (p.capped ? ` · лучшее, что влезает в ${fmtBytes(LIMIT_BYTES)}` : "");
+    } else {
+      // «Высота» — короткая сторона: у вертикального 1080x1920 это 1080.
+      const side = f => (f.width && f.height) ? Math.min(f.width, f.height) : (f.height || 0);
+      const h = settings.height === "auto" ? Infinity : parseInt(settings.height);
+      const v = fs.filter(f => (f.kind === "video" || f.kind === "both") && side(f) <= h)
+        .sort((a, b) => (side(b) - side(a)) || ((b.fps || 0) - (a.fps || 0))
+                        || ((b.tbr || 0) - (a.tbr || 0)))[0];
+      if (v) {
+        total = bytesOf(v);
+        if (v.kind === "video") { const a = bestAudio(); if (a) total += bytesOf(a); }
+      }
     }
   }
   if (total > 0) {
     // С отрезком файл меньше пропорционально его доле в ролике.
     const clip = clipFraction();
-    el.textContent = "≈ " + fmtBytes(Math.round(total * clip)) + (clip < 1 ? " · отрезок" : "");
+    el.textContent = "≈ " + fmtBytes(Math.round(total * clip))
+      + (what ? " · " + what : "") + (clip < 1 ? " · отрезок" : "");
     box.classList.remove("hidden");
   } else {
     box.classList.add("hidden");
