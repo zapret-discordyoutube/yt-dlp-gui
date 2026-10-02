@@ -12,8 +12,16 @@
     следующем `systemctl restart ytdlp-gui`.
   - gunicorn: `--workers 1 --threads 64` (один процесс: **состояние задач
     держится в памяти**, поэтому рестарт стирает очередь и текущие загрузки).
-  - Перезапуск: `sudo systemctl restart ytdlp-gui` (запускается от `codex-pve`,
-    `sudo` без пароля доступен).
+  - Перезапуск: `sudo systemctl restart ytdlp-gui`.
+  - **Работает от системного пользователя `ytgrab`, не от `codex-pve`.** На
+    хосте стоит VPN-замок `ccw-vpn` (`ccw-vpn-lock.service`, `/etc/ccw-vpn`):
+    весь трафик uid 1000 (`codex-pve`) идёт в туннель `hytun`, а мимо него —
+    сброс. Под `codex-pve` привязка к <IP_ДЛЯ_YOUTUBE> давала «Connection reset by
+    peer» на любой запрос к YouTube (29.09.2026). Доступ `ytgrab` к репо —
+    ACL: `x` на `/home/codex-pve`, `rX` на репо, `rwX` на `downloads/` и
+    `data/` (с default-ACL для новых файлов). Проверять связь — от его имени:
+    `sudo -u ytgrab curl --interface <IP_ДЛЯ_YOUTUBE> https://ipinfo.io/ip`; curl от
+    `codex-pve` покажет выход VPN, а не прод.
 - **nginx:** `/etc/nginx/sites-available/yt.zapret.moe`. Лимиты: `limit_conn 24`
   на IP, `limit_req` 30r/m (heavy) и 240r/m (read).
 
@@ -70,12 +78,41 @@ SNI-DPI, не блокировка IP.
 - **Список хостов:** `/opt/zapret-egress/egress-hosts.txt` (root). Матчатся хост
   и все поддомены. Чтобы разблокировать новый сайт — **дописать его домен сюда**
   и `sudo systemctl restart zapret-egress`.
-  - Уже добавлены: `soundcloud.com`, `sndcdn.com`, `x.com`, `twitter.com`,
-    `twimg.com`, `instagram.com`, `cdninstagram.com`, `fbcdn.net`,
-    `pornhub.com`, `phncdn.com` (плюс исходные `t.me`, `vkvideo.ru`,
-    `xvideos.com` и т.д.).
-- Проверка после добавления: `openssl s_client -connect <ip>:443 -servername
-  <host> </dev/null` должен дать `CONNECTED`; затем `yt-dlp --simulate <url>`.
+  - Уже добавлены: `soundcloud.com`, `sndcdn.com`, `twimg.com`,
+    `instagram.com`, `cdninstagram.com`, `fbcdn.net`, `pornhub.com`,
+    `phncdn.com` (плюс исходные `t.me`, `vkvideo.ru`, `xvideos.com` и т.д.).
+- **У X свой список и своя стратегия** (01.10.2026):
+  `/opt/zapret-egress/egress-hosts-x.txt` (`x.com`, `twitter.com`, `t.co`) —
+  первый профиль в юните, `hostfakesplit:tcp_ts=-1000:repeats=1`; общий список
+  — второй профиль (`--new`), прежний `multidisorder`. **Не возвращать эти
+  домены в общий список.** `x.com`/`api.x.com` живут на двух адресах Cloudflare,
+  DNS отдаёт их по очереди: на `172.66.0.227` всё открывается и без обхода, а
+  на `162.159.140.229` провайдер пропускает ClientHello и глушит поток уже
+  ПОСЛЕ рукопожатия (0 байт ответа), `multidisorder` там не проходит даже
+  рукопожатие. Отсюда «Проверяем…» и ошибка через раз: `SSL:
+  UNEXPECTED_EOF_WHILE_READING`, `RemoteDisconnected`, `Read timed out` на
+  «Downloading guest token / GraphQL JSON». Стратегия опирается на TCP
+  timestamps (`net.ipv4.tcp_timestamps=1`): подложный сегмент сервер
+  отбрасывает по PAWS.
+- **Проверять полным HTTP-запросом, а не рукопожатием.** `openssl s_client …
+  CONNECTED` и удачный TLS-хендшейк здесь ничего не доказывают (см. выше): нужен
+  ответ с телом, на КАЖДОМ адресе хоста, несколько раз подряд —
+  `sudo -u ytgrab curl --resolve x.com:443:162.159.140.229 https://x.com/ -o
+  /dev/null -w '%{http_code}/%{size_download}\n'` → `200/35xxx`; затем
+  `yt-dlp --simulate <url>` раз десять (один успех — не показатель: мог
+  выпасть «хороший» адрес). Проверять от `ytgrab` или root: трафик
+  `codex-pve` уходит в VPN.
+- **Стратегия перестала работать** — подобрать новую, не трогая прод:
+  `sudo python3 /opt/zapret-egress/strattest.py /opt/zapret-egress/strattest-strategies.txt
+  <ip> <sni> / <мин. байт ответа> <повторов>`. Стенд поднимает второй `nfqws2`
+  (очередь 201) и отдельную таблицу nft, которая ловит только сокеты с меткой
+  `0x00100000`; боевая очередь 200 не затрагивается, таблица убирается сама.
+  01.10.2026 из 55 стратегий адрес `162.159.140.229` пробивали 10:
+  `hostfakesplit` (с `tcp_md5`/`tcp_ts`), `fake` с `tcp_ts=-1000` или
+  `tcp_seq=1000000`, `multisplit:pos=10,midsld:seqovl=1`; весь `multidisorder`
+  и простой `multisplit` — нет.
+- Проверка после добавления сайта в общий список: полный запрос (как выше), затем
+  `yt-dlp --simulate <url>`.
 
 ## YouTube: отдельный IP <IP_ДЛЯ_YOUTUBE> (главное)
 

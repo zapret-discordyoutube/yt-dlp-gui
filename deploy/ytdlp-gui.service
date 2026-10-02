@@ -1,12 +1,19 @@
 [Unit]
 Description=yt-grab — веб-GUI для yt-dlp (yt.zapret.moe)
-After=network-online.target
+After=network-online.target ytgrab-egress-tunnel.service ytgrab-egress-pool.target ytgrab-youtube-ip.service
+Wants=ytgrab-egress-tunnel.service ytgrab-egress-pool.target ytgrab-youtube-ip.service
 Wants=network-online.target
 
 [Service]
 Type=simple
-User=codex-pve
-Group=codex-pve
+# Отдельный системный пользователь, а не codex-pve: весь трафик uid 1000
+# (codex-pve) заворачивает в туннель VPN-замок ccw-vpn (ccw-vpn-lock.service,
+# /etc/ccw-vpn), а всё мимо туннеля сбрасывает. Привязка к <IP_ДЛЯ_YOUTUBE> на
+# vmbr0 под ним даёт «Connection reset by peer» — 29.09.2026 YouTube так и
+# лёг. Доступ к репозиторию — ACL: x на /home/codex-pve, rX на репо,
+# rwX на downloads/ и data/ (setfacl, пакет acl).
+User=ytgrab
+Group=ytgrab
 WorkingDirectory=/home/codex-pve/ytdlp-gui
 
 # Домашняя папка примонтирована только на чтение (ProtectHome),
@@ -15,13 +22,16 @@ Environment=HOME=/tmp
 Environment=YTG_HOST=127.0.0.1
 Environment=YTG_PORT=8090
 Environment=YTG_TRUST_PROXY=1
-Environment=YTG_MAX_CONCURRENT=3
+Environment=YTG_MAX_CONCURRENT=32
 Environment=YTG_MAX_FILESIZE_MB=2048
 # Квота держится заметно ниже свободного места на разделе: это
 # гипервизор, и заполнить его корень — значит остановить виртуальные
 # машины, а не просто отдать пользователю ошибку.
 Environment=YTG_DISK_QUOTA_MB=5120
 Environment=YTG_QUIET_ACCESS_LOG=1
+Environment=YTG_EGRESS_PROXY=socks5h://127.0.0.1:18099
+Environment=YTG_EGRESS_POOL=socks5://127.0.0.1:18110-18141
+Environment=YTG_YT_SOURCE_IP=<IP_ДЛЯ_YOUTUBE>
 
 # Один воркер: состояние задач держится в памяти процесса.
 # Потоки обслуживают SSE-соединения и параллельные запросы.
@@ -88,8 +98,8 @@ IOWeight=20
 Nice=10
 
 # --- Лимиты ресурсов ---
-MemoryMax=2G
-TasksMax=256
+MemoryMax=4G
+TasksMax=2048
 
 [Install]
 WantedBy=multi-user.target
