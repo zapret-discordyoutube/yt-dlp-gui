@@ -27,7 +27,7 @@ Environment=YTG_MAX_FILESIZE_MB=2048
 # Квота держится заметно ниже свободного места на разделе: это
 # гипервизор, и заполнить его корень — значит остановить виртуальные
 # машины, а не просто отдать пользователю ошибку.
-Environment=YTG_DISK_QUOTA_MB=5120
+Environment=YTG_DISK_QUOTA_MB=51200
 Environment=YTG_QUIET_ACCESS_LOG=1
 Environment=YTG_EGRESS_PROXY=socks5h://127.0.0.1:18099
 Environment=YTG_EGRESS_POOL=socks5://127.0.0.1:18110-18141

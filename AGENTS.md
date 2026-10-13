@@ -34,7 +34,7 @@
 | `YTG_TASKS_MAX` | 500 (дефолт) | потолок записей задач |
 | `YTG_MAX_FILESIZE_MB` | 2048 | максимум на файл |
 | `YTG_CLIP_SOURCE_MAX_MB` | 4096 (дефолт) | только откат отрезка YouTube (HLS-дорожки): ролик качается целиком — потолок на целый; результат ≤ `MAX_FILESIZE_MB` |
-| `YTG_DISK_QUOTA_MB` | 5120 | квота на папку загрузок; при превышении старые готовые файлы вытесняются (`_evict_for_quota`), а не дают отказ |
+| `YTG_DISK_QUOTA_MB` | **51200** | квота на папку загрузок (50 ГБ, с 13.10.2026; было 5 ГБ — в неё влезало два с половиной файла предельного размера); при превышении старые готовые файлы вытесняются (`_evict_for_quota`), а не дают отказ |
 | `YTG_EVICT_MIN_AGE_SEC` | 300 (дефолт) | файл моложе вытесняется в последнюю очередь |
 | `MemoryMax` / `TasksMax` | 4G / 2048 | лимиты cgroup (юнит); процессы загрузок считаются сюда же |
 
@@ -95,6 +95,35 @@ SNI-DPI, не блокировка IP.
   «Downloading guest token / GraphQL JSON». Стратегия опирается на TCP
   timestamps (`net.ipv4.tcp_timestamps=1`): подложный сегмент сервер
   отбрасывает по PAWS.
+- **У YouTube тоже свой список и своя стратегия** (13.10.2026):
+  `/opt/zapret-egress/egress-hosts-yt.txt` (`youtube.com`, `youtu.be`,
+  `ytimg.com`, `ggpht.com`, `youtubei.googleapis.com`) — второй профиль в
+  юните, `hostfakesplit_multi:hosts=google.com,vimeo.com:tcp_ts=-1000:tcp_md5:repeats=2`
+  (стратегию выбрал владелец). До этого дня YouTube в списках не было вовсе:
+  провайдер его SNI не трогал, обходили только `googlevideo.com`. 13.10.2026
+  он начал молча глотать ClientHello с этими именами — TCP к `142.251.15x.4`
+  проходит за 0,02 с, с SNI `www.google.com` на том же адресе TLS поднимается,
+  с `www.youtube.com` молчит. На сайте это выглядело как вечное «Проверяем…»
+  при пустом журнале: yt-dlp ждёт по 30 с на запрос и повторяет, а запасной
+  путь через egress в `probe` включается только по тексту бана
+  (`_BAN_SIGNATURES`), таймаут туда не входит. Не режут `www.google.com`,
+  `accounts.google.com`, `www.googleapis.com`. По таблице `perf` YouTube
+  не работал около 16 часов (последняя удачная загрузка — в третьем часу
+  ночи, починено в 18:55), и ничто об этом не сообщило: `/readyz` оставался
+  `ok`. Быстрая проверка: `sudo -u ytgrab curl -m 8 --interface <IP_ДЛЯ_YOUTUBE>
+  https://www.youtube.com/ -o /dev/null -w '%{http_code}/%{size_download}\n'`
+  → `200/95xxxx`; `000/0` при живом `https://www.google.com/` = снова SNI.
+  - `hostfakesplit_multi` — **не штатная** функция zapret2, а из
+    `/opt/zapret-egress/lua/zapret-multishake.lua` (подключён третьим
+    `--lua-init`; исходник — `zapretgui/private_zapretgui/dist/lua/`). При
+    обновлении zapret2 файл надо сохранить. `nfqws2` запускает Lua уже со
+    сброшенными правами (uid 1): файл должен читаться всем, вместе с
+    каталогами на пути.
+  - Запас, если multishake сломается: на стенде в тот же день YouTube
+    пробивали 31 стратегия из 62 — весь `multidisorder` (включая общую
+    `pos=1,midsld`, то есть хватило бы и просто дописать домены в общий
+    список), весь `hostfakesplit`, `fake` с `tcp_ts`/`tcp_md5`; простой
+    `multisplit` — нет.
 - **Проверять полным HTTP-запросом, а не рукопожатием.** `openssl s_client …
   CONNECTED` и удачный TLS-хендшейк здесь ничего не доказывают (см. выше): нужен
   ответ с телом, на КАЖДОМ адресе хоста, несколько раз подряд —
