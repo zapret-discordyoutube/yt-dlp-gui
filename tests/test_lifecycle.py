@@ -110,6 +110,105 @@ def test_janitor_keeps_gitkeep(manager, monkeypatch):
     assert keep.exists(), "маркер каталога удалён уборщиком"
 
 
+# --- вытеснение по квоте ---------------------------------------------------
+
+@pytest.fixture
+def quota(monkeypatch):
+    """Квота в 1 МБ и чистый каталог: три файла по 400 КБ её превышают."""
+    monkeypatch.setattr(config, "DISK_QUOTA_MB", 1)
+    monkeypatch.setattr(config, "MIN_FREE_DISK_MB", 0)
+    monkeypatch.setattr(config, "EVICT_MIN_AGE_SEC", 300)
+    config.DOWNLOAD_DIR.mkdir(parents=True, exist_ok=True)
+
+    def wipe():
+        for p in config.DOWNLOAD_DIR.iterdir():
+            if p.is_file() and p.name != ".gitkeep":
+                p.unlink()
+
+    wipe()
+    yield
+    wipe()
+
+
+def _ready_file(m, tid, age, status="finished", served_ago=None):
+    """Задача с файлом в 400 КБ, готовым `age` секунд назад."""
+    import os
+    t = _task(m, status=status, tid=tid * 32)
+    p = config.DOWNLOAD_DIR / f"{t.id}.mp4"
+    p.write_bytes(b"\0" * 400_000)
+    when = time.time() - age
+    os.utime(p, (when, when))
+    if status == "finished":
+        t.filename = p.name
+    if served_ago is not None:
+        t.served_at = time.time() - served_ago
+    return t, p
+
+
+def test_quota_evicts_oldest_instead_of_refusing(manager, quota):
+    """Квота только отказывала: готовые файлы ждали своего срока, и сервис
+    отвечал «нет места» всем при пустом диске (10.10.2026)."""
+    _, oldest = _ready_file(manager, "1", age=3000)
+    _, middle = _ready_file(manager, "2", age=2000)
+    _, newest = _ready_file(manager, "3", age=1000)
+
+    assert manager.quota_exceeded() is False
+    assert not oldest.exists(), "самый старый файл должен был уйти"
+    assert middle.exists() and newest.exists(), "удалено больше, чем нужно"
+
+
+def test_quota_evicts_served_before_unclaimed(manager, quota):
+    _, unclaimed = _ready_file(manager, "1", age=3000)
+    _, other = _ready_file(manager, "2", age=2000)
+    taken, served = _ready_file(manager, "3", age=1000, served_ago=600)
+
+    assert manager.quota_exceeded() is False
+    assert not served.exists(), "забранный файл уходит раньше незабранных"
+    assert unclaimed.exists() and other.exists()
+    assert taken.status == "served" and taken.filename is None
+
+
+def test_quota_spares_fresh_files_while_older_suffice(manager, quota):
+    _, aged = _ready_file(manager, "1", age=400)
+    _, fresh = _ready_file(manager, "2", age=10)
+    _, taken = _ready_file(manager, "3", age=200, served_ago=5)
+
+    assert manager.quota_exceeded() is False
+    assert not aged.exists()
+    assert fresh.exists() and taken.exists(), "свежие удалены раньше отлежавшего"
+
+
+def test_quota_evicts_fresh_files_rather_than_refusing(manager, quota):
+    """Срок — предпочтение, а не запрет: всплеск свежих файлов не должен
+    возвращать отказ."""
+    _, first = _ready_file(manager, "1", age=30)
+    _, second = _ready_file(manager, "2", age=20)
+    _, third = _ready_file(manager, "3", age=10)
+
+    assert manager.quota_exceeded() is False
+    assert not first.exists()
+    assert second.exists() and third.exists()
+
+
+def test_quota_never_evicts_live_downloads(manager, quota):
+    """Отказ остаётся только тогда, когда квоту занимают идущие загрузки."""
+    files = [_ready_file(manager, c, age=3000, status="downloading")[1]
+             for c in "123"]
+
+    assert manager.quota_exceeded() is True
+    assert all(p.exists() for p in files), "удалён файл идущей загрузки"
+
+
+def test_janitor_brings_folder_under_quota(manager, quota):
+    _, oldest = _ready_file(manager, "1", age=3000)
+    _ready_file(manager, "2", age=2000)
+    _ready_file(manager, "3", age=1000)
+
+    manager._janitor_pass()
+    assert not oldest.exists()
+    assert manager.health()["downloads_mb"] < config.DISK_QUOTA_MB
+
+
 # --- очередь и пул ---------------------------------------------------------
 
 def test_queue_overflow_is_rejected(manager, monkeypatch):

@@ -1030,6 +1030,10 @@ class DownloadManager:
         # если уборщик тихо умер, файлы перестанут удаляться, диск заполнится,
         # и без этого признака поломка будет невидима.
         self.last_janitor_ok = time.time()
+        # Вытеснение по квоте зовут и уборщик, и каждый запрос на загрузку:
+        # без блокировки два потока считали бы один и тот же перебор и
+        # удаляли вдвое больше нужного.
+        self._evict_lock = threading.Lock()
         self.queue: queue.Queue = queue.Queue(maxsize=config.QUEUE_MAX)
         for _ in range(config.MAX_CONCURRENT_DOWNLOADS):
             threading.Thread(target=self._worker, daemon=True).start()
@@ -1108,6 +1112,10 @@ class DownloadManager:
                         p.unlink()
                 except OSError:
                     pass
+
+        # 3) папка всё ещё выше квоты -> вытеснить старые готовые файлы
+        self._evict_for_quota()
+
         # снять старые карточки задач (только в памяти)
         tcut = now - config.TASK_TTL_MINUTES * 60
         stuck: list[Task] = []
@@ -1159,9 +1167,87 @@ class DownloadManager:
                                           "(подряд неудач: %d)", fails)
         threading.Thread(target=loop, daemon=True).start()
 
+    def _evict_for_quota(self) -> float:
+        """Папка упёрлась в квоту — удалить самые старые готовые файлы.
+
+        Возвращает размер папки в МБ после вытеснения.
+
+        Раньше квота умела только отказывать: готовый файл ждал своего срока
+        (SERVED_GRACE_SEC после выдачи, FILE_TTL_MINUTES без неё), и девять
+        роликов за 12 минут закрыли сервис для всех при 947 ГБ свободного
+        диска (10.10.2026). Теперь лежащие файлы — кэш: новая загрузка
+        важнее старого файла.
+
+        Порядок: ничьи файлы, затем отлежавшие EVICT_MIN_AGE_SEC, затем
+        свежие; при прочих равных забранный уходит раньше незабранного,
+        старый — раньше нового. Срок — предпочтение, а не запрет: иначе
+        всплеск свежих файлов снова давал бы отказ. Не трогаются только
+        файлы идущих загрузок, так что отказ остаётся лишь тогда, когда
+        квоту занимают они сами.
+
+        Идущую отдачу удаление не рвёт: открытый файл живёт до закрытия
+        дескриптора. Ломается только докачка по Range.
+        """
+        with self._evict_lock:
+            used = self._dir_size_mb() * 1048576
+            need = used - config.DISK_QUOTA_MB * 1048576
+            if need < 0:
+                return used / 1048576
+
+            now = time.time()
+            with self.lock:
+                tasks = list(self.tasks.values())
+            live = {t.id for t in tasks if t.status in ACTIVE_STATUSES}
+            owners = {t.filename: t for t in tasks if t.filename}
+
+            ranked = []
+            for p in config.DOWNLOAD_DIR.iterdir():
+                if not p.is_file() or p.name == ".gitkeep":
+                    continue
+                if any(p.name.startswith(tid) for tid in live):
+                    continue
+                try:
+                    st = p.stat()
+                except OSError:
+                    continue
+                t = owners.get(p.name)
+                if t is None:
+                    order = (0, 0, st.st_mtime)
+                else:
+                    # Забранному срок идёт от выдачи, незабранному — от готовности.
+                    since = t.served_at or st.st_mtime
+                    fresh = now - since < config.EVICT_MIN_AGE_SEC
+                    order = (2 if fresh else 1, 0 if t.served_at else 1, since)
+                ranked.append((order, st.st_size, p, t))
+            ranked.sort(key=lambda r: r[0])
+
+            freed = count = 0
+            for _, size, p, t in ranked:
+                if freed > need:
+                    break
+                try:
+                    p.unlink()
+                except OSError:
+                    continue
+                freed += size
+                count += 1
+                # Забранный файл закрываем так же, как уборщик по сроку.
+                # Незабранный оставляем «готовым»: /file ответит 410
+                # «Файл удалён с сервера», а не «уже забран».
+                if t is not None and t.served_at:
+                    t.status = "served"
+                    t.filename = None
+            if count:
+                print(f"[janitor] квота: вытеснено файлов: {count}, "
+                      f"{freed / 1048576:.0f} МБ", flush=True)
+            return (used - freed) / 1048576
+
     def quota_exceeded(self) -> bool:
-        """Своя квота ИЛИ нехватка места на разделе хоста."""
-        if self._dir_size_mb() >= config.DISK_QUOTA_MB:
+        """Своя квота ИЛИ нехватка места на разделе хоста.
+
+        Перед отказом по квоте вытесняются старые готовые файлы.
+        """
+        if self._evict_for_quota() >= config.DISK_QUOTA_MB:
             return True
         try:
             free_mb = shutil.disk_usage(config.DOWNLOAD_DIR).free / 1048576
