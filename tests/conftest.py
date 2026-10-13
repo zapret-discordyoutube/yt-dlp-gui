@@ -33,6 +33,15 @@ def _guard_paths():
     yield
 
 
+@pytest.fixture(autouse=True)
+def _youtube_direct_ok(monkeypatch):
+    """Тесты не ходят в сеть: «YouTube напрямую отвечает» — заглушка, состояние
+    проверки у каждого теста своё."""
+    import downloader as dl
+    monkeypatch.setattr(dl, "_yt_direct_check", lambda: True)
+    monkeypatch.setattr(dl, "_yt_reach", dl._YtReach())
+
+
 @pytest.fixture
 def client():
     import app as app_module

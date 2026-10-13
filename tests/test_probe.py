@@ -278,3 +278,161 @@ def test_probe_mixed_carousel_is_not_a_gallery(monkeypatch):
     assert not out["is_gallery"] and out["multi_count"] == 1 and out["multi_images"] == 2
     assert dl.multi_post("https://www.instagram.com/p/c/") == {"videos": 1, "images": 2, "entries": 3}
     assert dl.collect_images_indexed(info) == [(1, "https://cdn/p1.jpg"), (3, "https://cdn/p3.jpg")]
+
+
+# --- YouTube напрямую молчит (блокировка по SNI) -> сразу через egress --------
+# 13.10.2026 провайдер начал глотать TLS с именем youtube.com: ошибки нет,
+# yt-dlp ждёт по 30 с на запрос, «Проверяем…» висело минутами 16 часов подряд.
+
+_YT_OK = {"id": "x", "title": "Ролик", "duration": 60,
+          "formats": [{"format_id": "18", "ext": "mp4", "vcodec": "avc1",
+                       "acodec": "mp4a", "height": 360}]}
+
+
+@pytest.fixture
+def egress(monkeypatch):
+    import config
+    monkeypatch.setattr(config, "EGRESS_PROXY", "socks5h://127.0.0.1:1")
+    monkeypatch.setattr(config, "PROXY", "")
+    monkeypatch.setattr(dl, "_info_cache", dl.OrderedDict())
+    calls = []
+    monkeypatch.setattr(dl, "_probe_extract",
+                        lambda url, proxy: (calls.append(proxy), dict(_YT_OK))[1])
+    return calls
+
+
+def test_youtube_silent_directly_goes_via_egress_at_once(monkeypatch, egress):
+    """Прямой путь молчит — прямой разбор не запускается вовсе: он не упал
+    бы с ошибкой, а провисел бы минуты."""
+    monkeypatch.setattr(dl, "_yt_direct_check", lambda: False)
+    out = dl.probe("https://www.youtube.com/watch?v=x")
+    assert out["via_egress"] is True
+    assert egress == ["socks5h://127.0.0.1:1"]
+    assert dl.cached_info("https://www.youtube.com/watch?v=x", True), \
+        "разбор через egress — загрузке, тем же путём"
+
+
+def test_empty_answer_via_egress_is_retried_once(monkeypatch, egress):
+    """Туннель бывает медленным, и yt-dlp молча возвращает ролик без форматов.
+    Прямого пути нет — пробуем egress ещё раз, а не отдаём ошибку."""
+    monkeypatch.setattr(dl, "_yt_direct_check", lambda: False)
+    answers = iter([{**_YT_OK, "formats": []}, dict(_YT_OK)])
+    monkeypatch.setattr(dl, "_probe_extract",
+                        lambda url, proxy: (egress.append(proxy), next(answers))[1])
+    out = dl.probe("https://www.youtube.com/watch?v=x")
+    assert out["via_egress"] is True and out["formats"]
+    assert egress == ["socks5h://127.0.0.1:1"] * 2
+
+
+def test_reach_check_concerns_only_youtube(monkeypatch, egress):
+    asked = []
+    monkeypatch.setattr(dl, "_yt_direct_check", lambda: (asked.append(1), False)[1])
+    out = dl.probe("https://vimeo.com/1")
+    assert out["via_egress"] is False and egress == [None] and not asked
+
+
+def test_reach_check_can_be_switched_off(monkeypatch, egress):
+    import config
+    monkeypatch.setattr(config, "YT_REACH_CHECK", False)
+    monkeypatch.setattr(dl, "_yt_direct_check", lambda: False)
+    assert dl.probe("https://www.youtube.com/watch?v=x")["via_egress"] is False
+    assert egress == [None]
+
+
+def test_reach_check_is_cached_and_one_failure_is_not_an_outage(monkeypatch):
+    """Проверка — раз в TTL, а не на каждый разбор; одна неудача из двух
+    попыток — случайность, а не блокировка."""
+    answers = iter([False, True])
+    asked = []
+    monkeypatch.setattr(dl, "_yt_direct_check", lambda: (asked.append(1), next(answers))[1])
+    assert dl.yt_direct_ok() is True
+    assert dl.yt_direct_ok() is True
+    assert len(asked) == 2, "вторая попытка — только после неудачной первой, дальше кэш"
+
+
+def test_reach_outage_and_recovery_are_logged_once(monkeypatch, capsys):
+    """Поломку должно быть видно в журнале: 13.10.2026 он был пуст. Строка —
+    на смену состояния, а не на каждую проверку."""
+    import config
+    monkeypatch.setattr(config, "EGRESS_PROXY", "socks5h://127.0.0.1:1")
+    state = {"ok": False}
+    monkeypatch.setattr(dl, "_yt_direct_check", lambda: state["ok"])
+    monkeypatch.setattr(dl, "YT_REACH_FAIL_TTL_SEC", -1)     # без кэша: каждая проверка настоящая
+    assert dl.yt_direct_ok() is False
+    assert dl.yt_direct_ok() is False
+    assert dl.yt_direct_state()["ok"] is False
+    out = capsys.readouterr().out
+    assert out.count("[youtube] напрямую не отвечает") == 1 and "через egress" in out
+    state["ok"] = True
+    assert dl.yt_direct_ok() is True
+    assert "[youtube] напрямую снова отвечает" in capsys.readouterr().out
+    assert dl.yt_direct_state()["ok"] is True
+
+
+def test_https_alive_gives_up_on_silent_server():
+    """Так выглядит блокировка по SNI: TCP принят, в ответ — тишина. Проверка
+    обязана сдаться по таймауту, а не ждать вечно."""
+    import socket
+    import time
+    srv = socket.socket()
+    srv.bind(("127.0.0.1", 0))
+    srv.listen(1)
+    addr = srv.getsockname()
+    try:
+        t0 = time.time()
+        assert dl._https_alive("www.youtube.com", timeout=0.3, connect_to=addr) is False
+        assert time.time() - t0 < 2
+    finally:
+        srv.close()
+    assert dl._https_alive("www.youtube.com", timeout=0.3, connect_to=addr) is False, \
+        "порт закрыт — тоже «нет»"
+
+
+def test_playlist_probe_via_egress_when_youtube_is_silent(monkeypatch):
+    import config
+    monkeypatch.setattr(config, "EGRESS_PROXY", "socks5h://127.0.0.1:1")
+    monkeypatch.setattr(config, "PROXY", "")
+    monkeypatch.setattr(config, "YT_SOURCE_IP", "192.0.2.1")
+    monkeypatch.setattr(dl, "_yt_direct_check", lambda: False)
+    seen = {}
+
+    class Y(FakeYDL):
+        def __init__(self, opts):
+            seen.update(opts)
+            super().__init__({"title": "Курс", "entries": []})
+    monkeypatch.setattr(dl.yt_dlp, "YoutubeDL", lambda opts: Y(opts))
+    out = dl.probe("https://www.youtube.com/playlist?list=PLx")
+    assert out["via_egress"] is True
+    assert seen.get("proxy") == "socks5h://127.0.0.1:1" and "source_address" not in seen, \
+        "через прокси свой адрес не привязываем"
+
+
+# --- Туннель пула для разбора через egress ---------------------------------
+
+def test_egress_pool_skips_dead_tunnel(monkeypatch):
+    """Разбор через egress брал первый туннель пула; 13.10.2026 он был «живым
+    трупом» (ssh держит связь, данные не идут), и загрузка висела на подготовке
+    при 31 рабочем туннеле."""
+    import config
+    pool = ["socks5://127.0.0.1:1", "socks5://127.0.0.1:2", "socks5://127.0.0.1:3"]
+    monkeypatch.setattr(config, "EGRESS_POOL", pool)
+    monkeypatch.setattr(dl.random, "randrange", lambda n: 0)
+    monkeypatch.setattr(dl, "_tunnel_alive", lambda proxy: proxy != pool[0])
+    assert dl.egress_pool_proxy() == pool[1]
+    monkeypatch.setattr(dl, "_tunnel_alive", lambda proxy: False)
+    assert dl.egress_pool_proxy() == pool[0], "все молчат — отдаём хоть какой-то, а не падаем"
+
+
+def test_tunnel_alive_checks_the_far_end():
+    """Порт туннеля отвечает всегда; «жив» — когда соединение дошло дальше."""
+    import socket
+    srv = socket.socket()
+    srv.bind(("127.0.0.1", 0))
+    srv.listen(1)
+    port = srv.getsockname()[1]
+    try:
+        assert dl._tunnel_alive(f"socks5://127.0.0.1:{port}", timeout=0.3) is False
+    finally:
+        srv.close()
+    assert dl._tunnel_alive(f"socks5://127.0.0.1:{port}", timeout=0.3) is False
+

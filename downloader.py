@@ -6,11 +6,13 @@ import json
 import logging
 import os
 import queue
+import random
 import re
 import selectors
 import signal
 import socket
 import shutil
+import ssl
 import subprocess
 import sys
 import threading
@@ -620,6 +622,135 @@ def _is_ban_error(msg: str) -> bool:
     return any(s in m for s in _BAN_SIGNATURES)
 
 
+# --- YouTube напрямую: жив ли путь ------------------------------------------
+# Блокировка по SNI не даёт ошибки: TCP проходит, TLS молчит. Бан сайта мы
+# узнаём по тексту (_BAN_SIGNATURES), а здесь узнавать нечего — yt-dlp просто
+# ждёт. Поэтому путь проверяется отдельно, коротким запросом с жёстким
+# таймаутом, а результат держится в памяти: проверку обновляет уборщик, и
+# разбор ссылки её почти никогда не ждёт.
+YT_REACH_HOST = "www.youtube.com"
+YT_REACH_TIMEOUT_SEC = 4.0
+YT_REACH_OK_TTL_SEC = 60        # «отвечает» перепроверяем раз в минуту
+YT_REACH_FAIL_TTL_SEC = 20      # «не отвечает» — чаще, чтобы быстро вернуться
+
+
+def _https_alive(host: str, source_ip: str = "", timeout: float = YT_REACH_TIMEOUT_SEC,
+                 connect_to: tuple[str, int] | None = None) -> bool:
+    """Отвечает ли хост по HTTPS: рукопожатие И первые байты ответа.
+
+    Одного рукопожатия мало: бывает, что провайдер пропускает ClientHello и
+    глушит поток следом (так было с x.com). Только IPv4 — как и загрузки.
+    """
+    try:
+        addr = connect_to or socket.getaddrinfo(
+            host, 443, socket.AF_INET, socket.SOCK_STREAM)[0][4]
+        with socket.create_connection(
+                addr, timeout=timeout,
+                source_address=(source_ip, 0) if source_ip else None) as raw:
+            with ssl.create_default_context().wrap_socket(raw, server_hostname=host) as tls:
+                tls.sendall(f"HEAD /generate_204 HTTP/1.1\r\nHost: {host}\r\n"
+                            "Connection: close\r\n\r\n".encode())
+                return tls.recv(16).startswith(b"HTTP/")
+    except (OSError, ValueError):
+        return False
+
+
+def _yt_direct_check() -> bool:
+    return _https_alive(YT_REACH_HOST, config.YT_SOURCE_IP)
+
+
+class _YtReach:
+    def __init__(self):
+        self.lock = threading.Lock()
+        self.ok: bool | None = None     # None — ещё не проверяли
+        self.checked_at = 0.0
+        self.since = 0.0                # когда состояние сменилось
+
+    def fresh(self) -> bool:
+        ttl = YT_REACH_OK_TTL_SEC if self.ok else YT_REACH_FAIL_TTL_SEC
+        return self.ok is not None and time.time() - self.checked_at < ttl
+
+
+_yt_reach = _YtReach()
+
+
+def yt_direct_ok() -> bool:
+    """YouTube отвечает напрямую (с YT_SOURCE_IP)? Результат кэшируется."""
+    r = _yt_reach
+    if r.fresh():
+        return bool(r.ok)
+    with r.lock:
+        if r.fresh():                   # пока ждали блокировку, проверил другой
+            return bool(r.ok)
+        # Одна неудача бывает случайной — отказом считаем две подряд.
+        ok = _yt_direct_check() or _yt_direct_check()
+        now = time.time()
+        if ok != r.ok:
+            if not ok:
+                print(f"[youtube] напрямую не отвечает ({YT_REACH_HOST}: TLS молчит "
+                      "или рвётся) — похоже на блокировку по SNI, см. AGENTS.md. "
+                      + ("Разбор и загрузки идут через egress."
+                         if config.EGRESS_PROXY else "Запасного пути нет."), flush=True)
+            elif r.ok is False:
+                print("[youtube] напрямую снова отвечает (не отвечал "
+                      f"{(now - r.since) / 60:.0f} мин)", flush=True)
+            r.since = now
+        r.ok, r.checked_at = ok, now
+        return ok
+
+
+def yt_direct_state() -> dict:
+    """Для /readyz: последнее известное состояние, без похода в сеть."""
+    r = _yt_reach
+    return {"ok": r.ok, "since": round(r.since) if r.since else None,
+            "checked_age_sec": round(time.time() - r.checked_at) if r.checked_at else None}
+
+
+def yt_egress_fallback(url: str) -> bool:
+    """YouTube напрямую не отвечает — эту ссылку надо вести через egress.
+
+    Спрашивает сервер, а не клиент: страницу могли открыть до поломки, и
+    тогда признак via_egress из прошлого разбора уже неверен.
+    """
+    return bool(config.YT_REACH_CHECK and config.EGRESS_PROXY and not config.PROXY
+                and is_youtube(url) and not yt_direct_ok())
+
+
+def _tunnel_alive(proxy: str, timeout: float = 3.0) -> bool:
+    """SOCKS-туннель доносит соединение до YouTube? Порт туннеля отвечает
+    всегда — проверяем дальний конец."""
+    import socks                      # PySocks: нужен только с пулом туннелей
+    u = urlparse(proxy)
+    s = socks.socksocket()
+    try:
+        s.set_proxy(socks.SOCKS5, u.hostname, u.port, rdns=u.scheme == "socks5h")
+        s.settimeout(timeout)
+        s.connect((YT_REACH_HOST, 443))
+        return True
+    except (OSError, ValueError):
+        return False
+    finally:
+        s.close()
+
+
+def egress_pool_proxy() -> str:
+    """Живой туннель пула — для разбора ролика через egress (куски racefd
+    раздаёт по туннелям сам и мёртвые обходит).
+
+    Раньше брался первый туннель. 13.10.2026 именно он оказался «живым
+    трупом»: ssh держит связь (ServerAlive проходит), а данные не идут — и
+    вся загрузка через egress висела на подготовке при 31 рабочем туннеле.
+    Начинаем со случайного, чтобы разборы не садились на один туннель.
+    """
+    pool = config.EGRESS_POOL
+    start = random.randrange(len(pool))
+    for i in range(min(len(pool), 4)):
+        proxy = pool[(start + i) % len(pool)]
+        if _tunnel_alive(proxy):
+            return proxy
+    return pool[start]
+
+
 def is_youtube_list(url: str) -> bool:
     """Ссылка на плейлист или канал YouTube (а не на конкретный ролик)."""
     if not is_youtube(url):
@@ -639,11 +770,13 @@ def probe_list(url: str) -> dict:
     """Плейлист/канал: только список роликов, без разбора каждого (быстро).
     Раньше yt-dlp разбирал ВСЕ ролики списка — минуты «Проверяем…», а
     потом ошибка «нет форматов»."""
+    via_egress = yt_egress_fallback(url)
     opts = {
         "quiet": True, "no_warnings": True, "skip_download": True,
         "extract_flat": "in_playlist", "playlistend": PLAYLIST_MAX,
         "socket_timeout": 30, "logger": _QuietLogger(),
-        **({"source_address": config.YT_SOURCE_IP} if config.YT_SOURCE_IP else {}),
+        **({"proxy": config.EGRESS_PROXY} if via_egress
+           else {"source_address": config.YT_SOURCE_IP} if config.YT_SOURCE_IP else {}),
     }
     with yt_dlp.YoutubeDL(opts) as ydl:
         info = ydl.sanitize_info(ydl.extract_info(url, download=False))
@@ -671,6 +804,7 @@ def probe_list(url: str) -> dict:
         "count": info.get("playlist_count") or len(entries),
         "entries": entries,
         "webpage_url": info.get("webpage_url") or url,
+        "via_egress": via_egress,
     }
 
 
@@ -792,15 +926,26 @@ def probe(url: str) -> dict:
     if is_youtube_list(url):
         return probe_list(url)
     # Прямой доступ; при бане (IP-блок/гео/403) — повтор через egress-прокси.
-    via_egress = False
+    # YouTube, который напрямую молчит (блокировка по SNI), — сразу через
+    # egress: ошибки там не дождаться, только таймаутов.
+    via_egress = yt_egress_fallback(url)
     try:
-        info = _probe_extract(url, config.PROXY or None)
+        info = _probe_extract(url, config.EGRESS_PROXY if via_egress
+                              else config.PROXY or None)
     except yt_dlp.utils.DownloadError as e:
-        if config.EGRESS_PROXY and _is_ban_error(str(e)):
+        if not via_egress and config.EGRESS_PROXY and _is_ban_error(str(e)):
             info = _probe_extract(url, config.EGRESS_PROXY)
             via_egress = True
         else:
             raise
+    # Прямого пути нет, а egress вернул ролик без форматов: туннель бывает
+    # медленным, и часть запросов yt-dlp молча не доходит. Ещё одна попытка —
+    # идти больше некуда, а без неё разовый сбой становился ошибкой.
+    if via_egress and not info.get("formats") and not info.get("entries"):
+        try:
+            info = _probe_extract(url, config.EGRESS_PROXY)
+        except yt_dlp.utils.DownloadError:
+            pass
     # Ролик без единого формата — часто тот же бан, только молчаливый:
     # при ignore_no_formats_error YouTube-антибот («Sign in to confirm you're
     # not a bot») не бросает ошибку, а отдаёт страницу без форматов.
@@ -1157,6 +1302,11 @@ class DownloadManager:
                     self._janitor_pass()
                     fails = 0
                     self.last_janitor_ok = time.time()
+                    # Заодно держим свежим «YouTube напрямую отвечает?»:
+                    # поломку видно в журнале и без посетителей, а разбор
+                    # ссылки не ждёт проверку сам.
+                    if config.YT_REACH_CHECK:
+                        yt_direct_ok()
                 except Exception:
                     # Молчать нельзя: если уборщик умер (например, каталог
                     # стал недоступен на запись), файлы перестают удаляться,
@@ -1368,7 +1518,7 @@ class DownloadManager:
         потокам): один туннель провайдер режет до ~300 КБ/с."""
         if task.use_egress:
             if config.EGRESS_POOL and is_youtube(task.url):
-                return config.EGRESS_POOL[0]
+                return egress_pool_proxy()
             if config.EGRESS_PROXY:
                 return config.EGRESS_PROXY
         return config.PROXY or None

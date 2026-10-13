@@ -82,6 +82,12 @@ PROXY = os.environ.get("YTG_PROXY", "").strip()
 # упёрся в бан — тогда probe пробует ещё раз через него, и если помогло,
 # скачивание идёт тоже через него. Пусто -> механизм выключен.
 EGRESS_PROXY = os.environ.get("YTG_EGRESS_PROXY", "").strip()
+# Короткая проверка «YouTube напрямую отвечает?» (downloader.yt_direct_ok).
+# Провайдер умеет молча глотать TLS с именем youtube.com: ошибки нет, yt-dlp
+# ждёт по 30 с на запрос, и «Проверяем…» висит минутами (13.10.2026 — 16
+# часов подряд). Если проверка не прошла, YouTube сразу идёт через
+# EGRESS_PROXY. Без EGRESS_PROXY только пишет в журнал и в /readyz.
+YT_REACH_CHECK = os.environ.get("YTG_YT_REACH_CHECK", "1") == "1"
 MAX_FILESIZE_MB = int(os.environ.get("YTG_MAX_FILESIZE_MB", "2048"))   # потолок на один файл
 # Отрезок с YouTube качается «по запросу» — только нужные байты (racefd.
 # SectionSession). Но HLS-дорожки так не умеют: тогда ролик качается ЦЕЛИКОМ

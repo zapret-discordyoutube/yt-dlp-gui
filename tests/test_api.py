@@ -246,3 +246,45 @@ def test_mixed_carousel_asks_runner_for_photos_too(client, monkeypatch):
     assert r.status_code == 201
     assert seen["playlist"] == 3 and seen["extra"].get(app_module.dl.POST_IMAGES_KEY)
     assert seen["label"].startswith("1 видео + 2 фото")
+
+
+# --- YouTube напрямую не отвечает ------------------------------------------
+
+def test_readyz_warns_when_youtube_is_silent_but_stays_ready(client, monkeypatch):
+    """Предупреждение, а не 503: остальные сайты работают, YouTube идёт через
+    egress. Но поломку должно быть видно (13.10.2026 /readyz был «ок» 16 часов)."""
+    import downloader as dl
+    r = client.get("/readyz")
+    assert r.get_json()["warnings"] == []
+    monkeypatch.setattr(dl, "_yt_direct_check", lambda: False)
+    assert dl.yt_direct_ok() is False
+    r = client.get("/readyz")
+    body = r.get_json()
+    assert body["warnings"] == ["youtube_direct"]
+    assert body["checks"] and "youtube_direct" not in body["checks"]
+    assert body["metrics"]["youtube_direct"]["ok"] is False
+    pub = client.get("/readyz", environ_overrides={"REMOTE_ADDR": "203.0.113.7"}).get_json()
+    assert pub["warnings"] == ["youtube_direct"] and "metrics" not in pub
+
+
+def test_download_goes_via_egress_when_youtube_is_silent(client, monkeypatch):
+    """Путь выбирает сервер: страницу могли открыть до поломки, и клиент
+    признак via_egress не пришлёт."""
+    import app as app_module
+    import config
+    import downloader as dl
+    monkeypatch.setattr(config, "EGRESS_PROXY", "socks5h://127.0.0.1:1")
+    monkeypatch.setattr(config, "PROXY", "")
+    monkeypatch.setattr(dl, "_yt_direct_check", lambda: False)
+    seen = {}
+
+    class _T:
+        def public(self):
+            return {"id": "t"}
+    monkeypatch.setattr(app_module.manager, "create", lambda **kw: (seen.update(kw), _T())[1])
+    r = client.post("/api/downloads", json={"url": "https://www.youtube.com/watch?v=x"})
+    assert r.status_code == 201 and seen["use_egress"] is True
+    seen.clear()
+    r = client.post("/api/downloads", json={"url": "https://vimeo.com/1"})
+    assert r.status_code == 201 and seen["use_egress"] is False
+

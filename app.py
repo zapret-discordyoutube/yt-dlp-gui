@@ -192,11 +192,16 @@ def readyz():
 
     ok = all(checks.values())
     body = {"ok": ok, "checks": checks}
+    # YouTube напрямую не отвечает (блокировка по SNI) — это предупреждение,
+    # а не отказ: остальные сайты работают, YouTube идёт через egress, и 503
+    # здесь означал бы «сервис лежит». Наружу — только название.
+    yt = dl.yt_direct_state()
+    body["warnings"] = ["youtube_direct"] if yt["ok"] is False else []
     # Числа (свободное место на разделе гипервизора, глубина очереди,
     # версия yt-dlp) — только для локального мониторинга. Наружу уходит
     # лишь признак готовности: сайт публичный.
     if request.remote_addr in ("127.0.0.1", "::1"):
-        body["metrics"] = h
+        body["metrics"] = {**h, "youtube_direct": yt}
         body["version"] = dl.yt_dlp.version.__version__
     return jsonify(body), (200 if ok else 503)
 
@@ -261,7 +266,10 @@ def api_download():
             return err("Неверный отрезок: конец должен быть больше начала")
     # Разбор из «Проверить» (тем же путём): ориентация и длительность — для
     # «1080p» у вертикальных роликов и для лимита размера.
-    probed = dl.cached_info(url, bool(data.get("via_egress"))) or {}
+    # Путь выбирает сервер: YouTube, который напрямую сейчас не отвечает,
+    # идёт через egress, даже если страницу открыли до поломки.
+    use_egress = bool(data.get("via_egress")) or dl.yt_egress_fallback(url)
+    probed = dl.cached_info(url, use_egress) or {}
     try:
         if images_mode:
             # Пост-галерея: формат не выбираем, картинки берёт сам воркер.
@@ -355,7 +363,7 @@ def api_download():
                               title=title, thumbnail=thumb, bundle=bundle,
                               is_live=bool(data.get("is_live")),
                               images_mode=images_mode,
-                              use_egress=bool(data.get("via_egress")),
+                              use_egress=use_egress,
                               clip=clip_task, playlist=playlist_n)
     except dl.Overloaded:
         # честный отказ сразу, а не молчаливое ожидание в очереди
