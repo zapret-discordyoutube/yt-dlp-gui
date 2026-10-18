@@ -355,6 +355,10 @@ _PP_ORDER = ("FFmpegExtractAudio", "FFmpegVideoRemuxer", "SponsorBlock", "Modify
 SPLIT_KEY = "ytg_split"
 # Флаг в extra: смешанная карусель — к роликам добавить фото поста (jobrunner).
 POST_IMAGES_KEY = "ytg_post_images"
+# Флаг в extra: после загрузки перекодировать под старый телевизор (jobrunner).
+TV_KEY = "ytg_tv"
+# Потолок высоты для «старого ТВ»: у таких экранов 1366×768, больше не нужно.
+TV_MAX_HEIGHT = "720"
 
 
 def apply_features(fmt: str, extra: dict, features: dict,

@@ -62,6 +62,8 @@ class Job:
         self.split: bool = bool(self.extra.pop(dl.SPLIT_KEY, False))
         # Смешанная карусель: к роликам — фото поста (см. download_playlist).
         self.post_images: bool = bool(self.extra.pop(dl.POST_IMAGES_KEY, False))
+        # «Для старого ТВ»: после загрузки перекодировать (см. transcode_tv).
+        self.tv: bool = bool(self.extra.pop(dl.TV_KEY, False))
         self.is_live: bool = bool(spec.get("is_live"))
         self.images_mode: bool = bool(spec.get("images_mode"))
         self.bundle: bool = bool(spec.get("bundle"))
@@ -269,6 +271,11 @@ class Job:
             if os.path.getsize(final) > config.MAX_FILESIZE_MB * 1048576:
                 return {"status": "error", "error": "Не удалось вырезать отрезок, а ролик "
                                                     "целиком превышает допустимый размер"}
+        if self.tv and not (self.playlist or self.bundle) and final and os.path.exists(final):
+            final = self.transcode_tv(final)
+            if final is None:
+                return {"status": "error", "error": self.error or
+                        "Не удалось подготовить файл для телевизора"}
         if self.bundle:
             self.status("processing")
             final = bundle_outputs(self.id, self.title) or final
@@ -279,6 +286,60 @@ class Job:
             return out
         return {"status": "error",
                 "error": self.error or "Файл не найден после скачивания"}
+
+    def transcode_tv(self, path: str) -> str | None:
+        """Перекодировать готовый файл под старый телевизор (см. tv_cmd).
+
+        Возвращает путь к новому MKV; исходник удаляется. None — не вышло
+        (self.error — причина). Файл без видео (аудио) остаётся как есть.
+        """
+        duration, has_video = probe_media(path)
+        if not has_video:
+            return path
+        out = f"{os.path.splitext(path)[0]}.tv.mkv"
+        cmd = tv_cmd(path, out, tv_video_kbps(duration)) + ["-progress", "pipe:1", "-nostats"]
+        self.status("processing")
+        self.emit(ev="progress", percent=0, speed=None, eta=None, total=None)
+        try:
+            proc = subprocess.Popen(cmd, stdin=subprocess.DEVNULL, stdout=subprocess.PIPE,
+                                    stderr=subprocess.DEVNULL, text=True)
+        except OSError:
+            self.error = "Не удалось подготовить файл для телевизора"
+            return None
+        started = time.time()
+        try:
+            for line in proc.stdout:
+                if self.cancelled:
+                    proc.terminate()
+                    raise yt_dlp.utils.DownloadCancelled()
+                key, _, val = line.strip().partition("=")
+                if key == "out_time_us" and duration and val.isdigit():
+                    done = min(int(val) / 1e6 / duration, 0.99)
+                    if done > 0.01:
+                        eta = int((time.time() - started) * (1 - done) / done)
+                        self.emit(ev="progress", percent=round(done * 100, 1),
+                                  speed=None, eta=eta, total=None)
+            proc.wait()
+        finally:
+            if proc.poll() is None:
+                proc.kill()
+                proc.wait()
+        if self.cancelled:
+            raise yt_dlp.utils.DownloadCancelled()
+        if proc.returncode != 0 or not os.path.exists(out) or os.path.getsize(out) == 0:
+            self._unlink(out)
+            self.error = "Не удалось подготовить файл для телевизора"
+            return None
+        self._unlink(path)
+        self.emit(ev="progress", percent=100, speed=None, eta=None, total=None)
+        return out
+
+    @staticmethod
+    def _unlink(path: str) -> None:
+        try:
+            os.unlink(path)
+        except OSError:
+            pass
 
     def ydl_opts(self) -> dict:
         opts = {
@@ -499,6 +560,57 @@ class Job:
                 self.emit(ev="progress", percent=round(n / len(items) * 100, 1),
                           speed=None, eta=None, total=total)
         return saved
+
+
+# «Для старого ТВ»: профиль, который проверен на Philips 24PFL4228T (2013) —
+# H.264 High@4.0 с B-кадрами, не выше 720p, AAC-LC 48 кГц стерео, MKV.
+# Потоки с YouTube «как есть» (звук 44,1 кГц, их видео) телевизор не играл,
+# а перекодированные — да, поэтому перекодируются и видео, и звук. MKV, а не
+# MP4: на 70 минутах индекс MP4 (3 МБ) телевизор не осилил, у MKV он мал.
+TV_AUDIO_KBPS = 160
+TV_MAX_VIDEO_KBPS = 4000
+TV_MIN_VIDEO_KBPS = 300
+
+
+def tv_video_kbps(duration: float | None) -> int:
+    """Потолок битрейта видео: результат должен влезть в MAX_FILESIZE_MB."""
+    if not duration:
+        return TV_MAX_VIDEO_KBPS
+    budget = config.MAX_FILESIZE_MB * 8192 * 0.9      # кбит на весь файл
+    kbps = int(budget / duration) - TV_AUDIO_KBPS
+    return max(TV_MIN_VIDEO_KBPS, min(TV_MAX_VIDEO_KBPS, kbps))
+
+
+def tv_cmd(src: str, dst: str, video_kbps: int) -> list[str]:
+    # Коробка 1280×720 (у вертикальных 720×1280); min(...) не даёт растянуть
+    # маленькое видео, force_original_aspect_ratio — не искажает пропорции.
+    scale = ("scale='min(iw,if(gt(iw,ih),1280,720))':'min(ih,if(gt(iw,ih),720,1280))'"
+             ":force_original_aspect_ratio=decrease:force_divisible_by=2,format=yuv420p")
+    return ["ffmpeg", "-v", "error", "-y", "-i", src,
+            "-map", "0:v:0", "-map", "0:a:0?", "-sn", "-dn", "-vf", scale,
+            "-c:v", "libx264", "-profile:v", "high", "-level:v", "4.0",
+            "-preset", "veryfast", "-crf", "22",
+            "-maxrate", f"{video_kbps}k", "-bufsize", f"{2 * video_kbps}k",
+            "-c:a", "aac", "-b:a", f"{TV_AUDIO_KBPS}k", "-ar", "48000", "-ac", "2",
+            dst]
+
+
+def probe_media(path: str) -> tuple[float | None, bool]:
+    """(длительность в секундах, есть ли видеопоток) по ffprobe."""
+    try:
+        r = subprocess.run(
+            ["ffprobe", "-v", "error", "-show_entries",
+             "format=duration:stream=codec_type", "-of", "json", path],
+            capture_output=True, text=True, timeout=60, stdin=subprocess.DEVNULL)
+        info = json.loads(r.stdout or "{}")
+    except (OSError, subprocess.SubprocessError, ValueError):
+        return None, True            # не смогли узнать — пробуем перекодировать
+    try:
+        duration = float((info.get("format") or {}).get("duration") or 0) or None
+    except ValueError:
+        duration = None
+    has_video = any(st.get("codec_type") == "video" for st in info.get("streams") or [])
+    return duration, has_video
 
 
 def _fmt_gb(mb: int) -> str:

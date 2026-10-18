@@ -207,6 +207,9 @@
             </div>
           </div>
           <p class="hint" id="vaudio-hint">Источник отдаёт звук в AAC или Opus. MP3 — во вкладке «Аудио».</p>
+          <label class="chk"><input type="checkbox" id="chk-tv"><span>Для старого телевизора</span></label>
+          <p class="hint" id="tv-hint">Видео и звук перекодируются: MKV, H.264 до 720p, AAC. Играет там, где
+            обычный файл с YouTube не открывается. Занимает дольше: на часовом ролике — несколько минут.</p>
         </div>
 
         <!-- Аудио -->
@@ -379,7 +382,7 @@ const store = {
 };
 let settings = Object.assign(
   { mode: "video", height: "auto", vcodec: "auto", vaudio: "auto",
-    acodec: "best", theme: null, pp: {}, alang: "" },
+    acodec: "best", theme: null, pp: {}, alang: "", tv: false },
   store.get(LS_SETTINGS, {})
 );
 if (!settings.pp || typeof settings.pp !== "object") settings.pp = {};
@@ -628,6 +631,7 @@ function renderPreview(d) {
   $("#sel-vcodec").value = settings.vcodec;
   $("#sel-vaudio").value = settings.vaudio;
   $("#sel-acodec").value = settings.acodec;
+  $("#chk-tv").checked = !!settings.tv;
 
   renderFormats(d.formats || []);
 
@@ -845,6 +849,9 @@ document.querySelectorAll("#mode-seg button").forEach(b =>
     settings[key] = e.target.value; saveSettings(); updateSizeEst();
   });
 });
+$("#chk-tv").addEventListener("change", (e) => {
+  settings.tv = e.target.checked; saveSettings();
+});
 /* Выбор конкретного формата во «Все форматы» тоже меняет оценку. */
 $("#fmt-list").addEventListener("change", updateSizeEst);
 /* Язык звука. */
@@ -895,6 +902,7 @@ $("#download-btn").addEventListener("click", async () => {
     } else {
       body.kind = "video"; body.height = settings.height;
       body.vcodec = settings.vcodec; body.vaudio = settings.vaudio;
+      if (settings.tv) body.tv = true;
     }
     // Язык звука — только для видео/аудио и только если дорожек несколько.
     if (activeMode !== "all" && (current.audio_langs || []).length && settings.alang) {

@@ -248,6 +248,38 @@ def test_mixed_carousel_asks_runner_for_photos_too(client, monkeypatch):
     assert seen["label"].startswith("1 видео + 2 фото")
 
 
+def _post_tv(client, monkeypatch, **body):
+    import app as app_module
+    seen = {}
+
+    class _T:
+        def public(self):
+            return {"id": "t"}
+    monkeypatch.setattr(app_module.manager, "create", lambda **kw: (seen.update(kw), _T())[1])
+    r = client.post("/api/downloads", json={"url": "https://example.com/v", **body})
+    assert r.status_code == 201
+    return seen
+
+
+def test_tv_mode_caps_quality_and_asks_runner_to_transcode(client, monkeypatch):
+    import downloader as dl
+    seen = _post_tv(client, monkeypatch, kind="video", height="auto", tv=True)
+    assert seen["extra"].get(dl.TV_KEY) and seen["extra"]["merge_output_format"] == "mkv"
+    assert "height<=?720" in seen["fmt"] and "height<=?1080" not in seen["fmt"]
+    assert seen["label"].endswith("для ТВ")
+
+
+def test_tv_mode_keeps_lower_quality_choice(client, monkeypatch):
+    seen = _post_tv(client, monkeypatch, kind="video", height="480", tv=True)
+    assert "height<=?480" in seen["fmt"]
+
+
+def test_tv_mode_ignored_for_audio_and_without_flag(client, monkeypatch):
+    import downloader as dl
+    assert dl.TV_KEY not in _post_tv(client, monkeypatch, kind="audio", tv=True)["extra"]
+    assert dl.TV_KEY not in _post_tv(client, monkeypatch, kind="video")["extra"]
+
+
 # --- YouTube напрямую не отвечает ------------------------------------------
 
 def test_readyz_warns_when_youtube_is_silent_but_stays_ready(client, monkeypatch):

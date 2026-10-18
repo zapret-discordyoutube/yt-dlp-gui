@@ -255,6 +255,10 @@ def api_download():
         return err(message_for(e, "Плохая ссылка"))
 
     images_mode = str(data.get("kind")) == "image"
+    # «Для старого ТВ»: только одиночное видео; к аудио, плейлистам, эфирам и
+    # фото не применяется (решает флаг tv_mode ниже, после разбора запроса).
+    tv_mode = bool(data.get("tv")) and str(data.get("kind", "video")) == "video" \
+        and not images_mode and not data.get("is_live")
     # Отрезок «с X по Y» — до выбора формата: к отрезку лимит размера при
     # выборе не применяется (от длинного 4K нужен кусок, а не 1080p).
     clip = None
@@ -278,9 +282,12 @@ def api_download():
             fmt, extra, label = dl.build_from_format_id(
                 str(data["format_id"]), str(data.get("container", "auto")))
         else:
+            height = str(data.get("height", "auto"))
+            if tv_mode and height in ("auto", "2160", "1440", "1080"):
+                height = dl.TV_MAX_HEIGHT
             fmt, extra, label = dl.build_format(
                 kind=str(data.get("kind", "video")),
-                height=str(data.get("height", "auto")),
+                height=height,
                 acodec=str(data.get("acodec", "best")),
                 vcodec=str(data.get("vcodec", "auto")),
                 vaudio=str(data.get("vaudio", "auto")),
@@ -358,6 +365,9 @@ def api_download():
         thumb = (listing["entries"][0].get("thumbnail") or thumb)
         label = f"Плейлист · {playlist_n} шт. · {label.split(' · ✂')[0]}"
 
+    if tv_mode and not (playlist_n or bundle):
+        extra = {**extra, dl.TV_KEY: True, "merge_output_format": "mkv"}
+        label = f"{label} · для ТВ"
     try:
         task = manager.create(url=url, fmt=fmt, extra=extra, label=label,
                               title=title, thumbnail=thumb, bundle=bundle,

@@ -3,6 +3,7 @@
 Сеть наружу не нужна: источник — локальный сокет, который либо закрыт
 (ошибка сразу), либо принимает соединение и молчит (зависший сервер).
 """
+import shutil
 import socket
 import threading
 import time
@@ -342,3 +343,83 @@ def test_youtube_clip_uses_ranges_without_reencode():
     opts = job.ydl_opts()
     assert "download_ranges" in opts and opts["force_keyframes_at_cuts"] is False
     assert job.trim_after is False
+
+
+# --- «Для старого ТВ» -------------------------------------------------------
+
+def test_tv_bitrate_fits_size_limit(monkeypatch):
+    import jobrunner
+    monkeypatch.setattr(config, "MAX_FILESIZE_MB", 2048)
+    assert jobrunner.tv_video_kbps(300) == jobrunner.TV_MAX_VIDEO_KBPS
+    assert jobrunner.tv_video_kbps(None) == jobrunner.TV_MAX_VIDEO_KBPS
+    for dur in (3600, 4 * 3600, 20 * 3600):
+        kbps = jobrunner.tv_video_kbps(dur)
+        total_mb = (kbps + jobrunner.TV_AUDIO_KBPS) * dur / 8192
+        assert kbps >= jobrunner.TV_MIN_VIDEO_KBPS
+        assert total_mb <= 2048 or kbps == jobrunner.TV_MIN_VIDEO_KBPS
+
+
+def test_tv_cmd_uses_profile_checked_on_the_tv():
+    import jobrunner
+    cmd = jobrunner.tv_cmd("in.mkv", "out.mkv", 3000)
+    joined = " ".join(cmd)
+    assert "-profile:v high" in joined and "-level:v 4.0" in joined
+    assert "-ar 48000" in joined and "-c:a aac" in joined
+    assert "-maxrate 3000k" in joined
+    assert cmd[-1] == "out.mkv"
+
+
+@pytest.mark.skipif(shutil.which("ffmpeg") is None, reason="нужен ffmpeg")
+def test_transcode_tv_produces_playable_mkv(tmp_path):
+    """Живой прогон: 1080p с звуком 44,1 кГц -> 720p High, AAC 48 кГц, MKV."""
+    import io
+    import json
+    import subprocess
+    import jobrunner
+    src = tmp_path / ("a" * 32 + ".mp4")
+    subprocess.run(
+        ["ffmpeg", "-v", "error", "-f", "lavfi", "-i", "testsrc=size=1920x1080:rate=25:duration=2",
+         "-f", "lavfi", "-i", "sine=frequency=440:sample_rate=44100:duration=2",
+         "-c:v", "libx264", "-c:a", "aac", str(src)], check=True)
+    job = jobrunner.Job({"id": "a" * 32, "url": "https://example.com/v"}, io.StringIO())
+    out = job.transcode_tv(str(src))
+    assert out and out.endswith(".tv.mkv") and not src.exists()
+    info = json.loads(subprocess.run(
+        ["ffprobe", "-v", "error", "-show_entries",
+         "stream=codec_name,profile,height,sample_rate", "-of", "json", out],
+        capture_output=True, text=True, check=True).stdout)
+    v = next(s for s in info["streams"] if s["codec_name"] == "h264")
+    a = next(s for s in info["streams"] if s["codec_name"] == "aac")
+    assert v["profile"] == "High" and v["height"] == 720
+    assert a["sample_rate"] == "48000"
+
+
+@pytest.mark.skipif(shutil.which("ffmpeg") is None, reason="нужен ffmpeg")
+def test_transcode_tv_does_not_upscale_and_skips_audio_only(tmp_path):
+    import io
+    import subprocess
+    import jobrunner
+    small = tmp_path / ("b" * 32 + ".mp4")
+    subprocess.run(
+        ["ffmpeg", "-v", "error", "-f", "lavfi", "-i", "testsrc=size=640x360:rate=25:duration=1",
+         "-c:v", "libx264", str(small)], check=True)
+    job = jobrunner.Job({"id": "b" * 32, "url": "https://example.com/v"}, io.StringIO())
+    out = job.transcode_tv(str(small))
+    assert subprocess.run(
+        ["ffprobe", "-v", "error", "-show_entries", "stream=height", "-of", "csv=p=0", out],
+        capture_output=True, text=True).stdout.strip() == "360"
+    music = tmp_path / ("c" * 32 + ".m4a")
+    subprocess.run(
+        ["ffmpeg", "-v", "error", "-f", "lavfi", "-i", "sine=duration=1", "-c:a", "aac", str(music)],
+        check=True)
+    job2 = jobrunner.Job({"id": "c" * 32, "url": "https://example.com/v"}, io.StringIO())
+    assert job2.transcode_tv(str(music)) == str(music) and music.exists()
+
+
+def test_tv_flag_is_taken_out_of_ytdlp_opts():
+    import io
+    import jobrunner
+    job = jobrunner.Job({"id": "d" * 32, "url": "https://example.com/v",
+                         "extra": {dl.TV_KEY: True, "merge_output_format": "mkv"}},
+                        io.StringIO())
+    assert job.tv is True and dl.TV_KEY not in job.extra
