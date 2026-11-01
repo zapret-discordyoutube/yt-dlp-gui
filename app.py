@@ -31,6 +31,23 @@ if config.QUIET_ACCESS_LOG:
     # не пишем URL/IP пользователей в лог
     logging.getLogger("werkzeug").setLevel(logging.WARNING)
 
+SOURCE_PATH = "zapretdiscordyoutube/yt-dlp-gui"
+
+
+@app.context_processor
+def _source_url():
+    """Ссылка «Исходный код» — на рабочее имя git: правило имён только в zapret-links (git.zapret.moe и git2
+    закрыты по имени; решение владельца 2026-11-01)."""
+    try:
+        import sys
+        if "/home/codex-pve/zapret-links" not in sys.path:
+            sys.path.insert(0, "/home/codex-pve/zapret-links")
+        from zapret_links import client
+        return {"source_url": f"https://{client.link('git')}/{SOURCE_PATH}"}
+    except Exception:  # zapret-links недоступен: страница важнее ссылки
+        return {"source_url": f"https://git3.zapret.moe/{SOURCE_PATH}"}
+
+
 manager = dl.DownloadManager()
 stats.init()
 _mig = stats.run_migrations(dl.canonical_url)
