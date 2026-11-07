@@ -10,3 +10,10 @@ curl_cffi==0.16.3
 # PySocks — чтобы он же умел ходить через пул SOCKS-туннелей egress.
 requests==2.34.2
 PySocks==1.7.1
+# Необязательные зависимости yt-dlp (extras "default"), без них часть функций молча ломается:
+# mutagen — обложка и теги в аудио (m4a/opus/mp3), pycryptodomex — HLS с шифрованием AES-128,
+# brotli — ответы с Content-Encoding: br, websockets — чат эфиров. Версии — как на прежнем хосте (pve).
+mutagen==1.48.1
+pycryptodomex==3.23.0
+brotli==1.2.0
+websockets==17.1
