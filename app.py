@@ -4,6 +4,7 @@ from __future__ import annotations
 import json
 import logging
 import os
+import re
 import shutil
 import threading
 import time
@@ -34,18 +35,46 @@ if config.QUIET_ACCESS_LOG:
 SOURCE_PATH = "zapretdiscordyoutube/yt-dlp-gui"
 
 
+# Рабочее имя git раздаёт zapret-links: снимок публикуется на wiki (файл links.json), пакета zapret_links в этом
+# контейнере нет (на pve он стоял в /home/codex-pve/zapret-links). Читаем снимок по HTTP, помним 10 минут; при сбое
+# остаётся прежнее имя (или запасное git3) и повтор через 2 минуты. Страница важнее ссылки: не ждём больше 3 с.
+_LINKS_URL = os.environ.get("YTG_LINKS_URL", "https://wiki3.zapret.moe/_sites/links.json")
+_GIT_FALLBACK = "git3.zapret.moe"
+_GIT_HOST_RE = re.compile(r"^[a-z0-9]([a-z0-9-]*[a-z0-9])?(\.[a-z0-9]([a-z0-9-]*[a-z0-9])?)*\.zapret\.moe$")
+_git_cache = {"host": _GIT_FALLBACK, "until": 0.0}
+_git_lock = threading.Lock()
+
+
+def _fetch_links_json() -> dict:
+    import urllib.request
+    req = urllib.request.Request(_LINKS_URL, headers={"User-Agent": "yt-grab/source-link"})
+    with urllib.request.urlopen(req, timeout=3) as r:
+        return json.loads(r.read(1 << 20))
+
+
+def _git_host() -> str:
+    now = time.monotonic()
+    if now < _git_cache["until"] or not _git_lock.acquire(blocking=False):
+        return _git_cache["host"]          # свежо, либо другой поток уже обновляет
+    try:
+        if time.monotonic() >= _git_cache["until"]:
+            try:
+                host = str(_fetch_links_json()["families"]["git"]["link"]).strip().lower()
+                if not _GIT_HOST_RE.match(host):
+                    raise ValueError("bad host in links.json")
+                _git_cache.update(host=host, until=time.monotonic() + 600)
+            except Exception:  # снимок недоступен или не тот формат: оставляем прежнее имя
+                _git_cache["until"] = time.monotonic() + 120
+        return _git_cache["host"]
+    finally:
+        _git_lock.release()
+
+
 @app.context_processor
 def _source_url():
     """Ссылка «Исходный код» — на рабочее имя git: правило имён только в zapret-links (git.zapret.moe и git2
     закрыты по имени; решение владельца 2026-11-01)."""
-    try:
-        import sys
-        if "/home/codex-pve/zapret-links" not in sys.path:
-            sys.path.insert(0, "/home/codex-pve/zapret-links")
-        from zapret_links import client
-        return {"source_url": f"https://{client.link('git')}/{SOURCE_PATH}"}
-    except Exception:  # zapret-links недоступен: страница важнее ссылки
-        return {"source_url": f"https://git3.zapret.moe/{SOURCE_PATH}"}
+    return {"source_url": f"https://{_git_host()}/{SOURCE_PATH}"}
 
 
 manager = dl.DownloadManager()

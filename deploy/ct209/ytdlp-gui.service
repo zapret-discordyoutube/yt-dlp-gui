@@ -1,0 +1,57 @@
+[Unit]
+Description=yt-grab — веб-GUI для yt-dlp (yt.zapret.moe)
+After=network-online.target nftables.service
+Wants=network-online.target nftables.service
+
+[Service]
+Type=simple
+User=ytgrab
+Group=ytgrab
+WorkingDirectory=/opt/ytdlp-gui
+
+Environment=HOME=/tmp
+Environment=YTG_HOST=127.0.0.1
+Environment=YTG_PORT=8090
+Environment=YTG_TRUST_PROXY=1
+Environment=YTG_MAX_CONCURRENT=32
+Environment=YTG_MAX_FILESIZE_MB=2048
+# Quota on the downloads folder (50 GB; the CT disk is 100 GB)
+Environment=YTG_DISK_QUOTA_MB=51200
+Environment=YTG_QUIET_ACCESS_LOG=1
+# No YTG_YT_SOURCE_IP, YTG_EGRESS_PROXY, YTG_EGRESS_POOL: US2-7 has a single IP, goes direct, no tunnels (owner 2026-11-07)
+
+# One worker: task state lives in the memory of one process.
+# Two binds: loopback for /readyz and the front nginx (CT 204) on the CT address.
+ExecStart=/opt/ytdlp-gui/.venv/bin/gunicorn \
+    --workers 1 \
+    --threads 64 \
+    --timeout 0 \
+    --graceful-timeout 30 \
+    --bind 127.0.0.1:8090 \
+    --bind <CT_ADDRESS>:8090 \
+    --access-logfile /dev/null \
+    --error-logfile - \
+    app:app
+
+Restart=on-failure
+RestartSec=5
+
+NoNewPrivileges=yes
+PrivateTmp=yes
+ProtectSystem=strict
+ProtectHome=yes
+ReadWritePaths=/opt/ytdlp-gui/downloads
+ReadWritePaths=/opt/ytdlp-gui/data
+ProtectKernelTunables=yes
+ProtectKernelModules=yes
+ProtectControlGroups=yes
+RestrictSUIDSGID=yes
+RestrictNamespaces=yes
+LockPersonality=yes
+
+Nice=10
+MemoryMax=4G
+TasksMax=2048
+
+[Install]
+WantedBy=multi-user.target
